@@ -1,0 +1,39 @@
+{
+  "name": "vizdoom-basic",
+  "description": "ViZDoom Basic scenario policy search. Direction: maximize mean total episode reward on the parent ViZDoom checkout's scenarios/basic.cfg task.",
+  "domain": "vizdoom",
+  "direction": "maximize",
+  "primary_metric": "mean_total_reward",
+  "baseline": -300,
+  "target": 90,
+  "stochastic": false,
+  "visualizations": [
+    {
+      "type": "metrics",
+      "label": "Episode rewards"
+    },
+    {
+      "type": "artifact_media",
+      "label": "Approach GIF"
+    },
+    {
+      "type": "artifact_files",
+      "label": "Artifacts"
+    }
+  ],
+  "runner": {
+    "command": "experiments/vizdoom-basic/loop.py",
+    "args": [
+      "--experiment-root",
+      "{experiment_root}",
+      "--vizdoom-root",
+      "{experiment_root}/../../.."
+    ]
+  },
+  "paths": {
+    "journal": "journal",
+    "worktrees": "worktrees"
+  },
+  "venv": "/Users/seneca/Coding/ViZDoom/.venv",
+  "venv_reason": "use the sibling ViZDoom checkout's Python environment and locally built vizdoom package"
+}

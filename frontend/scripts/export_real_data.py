@@ -187,7 +187,7 @@ def _resolve_artifact(journal, artifact_path):
 
 def file_kind(path: Path) -> str:
     suffix = path.suffix.lower()
-    if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+    if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}:
         return "image"
     if suffix in {".mp4", ".webm", ".mov", ".m4v"}:
         return "video"
@@ -242,7 +242,7 @@ def artifact_details(journal: Path, artifact_path_value, summary: dict, raw_buck
     path = _resolve_artifact(journal, artifact_path_value)
     if not path:
         return None
-    artifact_root = path.parent.parent if path.parent.name == "bodies" else path.parent
+    artifact_root = path.parent.parent if path.parent.name in {"bodies", "policies"} else path.parent
     wanted = [path]
     for name in ["summary.json", "candidates.csv", "best.txt", "best.npy"]:
         p = artifact_root / name
@@ -250,9 +250,9 @@ def artifact_details(journal: Path, artifact_path_value, summary: dict, raw_buck
             wanted.append(p)
     stem = path.stem
     media_patterns = [
-        f"{stem}.png", f"{stem}.jpg", f"{stem}.jpeg", f"{stem}.gif", f"{stem}.webp",
+        f"{stem}.png", f"{stem}.jpg", f"{stem}.jpeg", f"{stem}.gif", f"{stem}.webp", f"{stem}.svg",
         f"{stem}.mp4", f"{stem}.webm", f"{stem}.mov", f"{stem}.m4v",
-        f"viz/{stem}.png", f"viz/{stem}.jpg", f"viz/{stem}.jpeg", f"viz/{stem}.gif", f"viz/{stem}.webp",
+        f"viz/{stem}.png", f"viz/{stem}.jpg", f"viz/{stem}.jpeg", f"viz/{stem}.gif", f"viz/{stem}.webp", f"viz/{stem}.svg",
         f"viz/{stem}.mp4", f"viz/{stem}.webm", f"viz/{stem}.mov", f"viz/{stem}.m4v",
     ]
     for pattern in media_patterns:

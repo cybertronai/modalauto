@@ -402,6 +402,9 @@
             <span className={`pill`} data-status={pillStatus(hover.st)}>
               <span className="dot" />{hover.st}</span></div>
           <div className="tt-title">{hover.n.title}</div>
+          {nodeImage(hover.n)
+            ? <img className="tt-media" src={artifactUrl(nodeImage(hover.n).path)} alt={nodeImage(hover.n).name || 'approach'} />
+            : null}
           {hover.n.score != null && hover.st === 'verified'
             ? <div className="tt-score mono">{fmtScore(hover.n.score) + ' ' + (E.meta.metric || 'score')}</div>
             : <div className="tt-score mono" style={{ color: 'var(--ink-3)' }}>
@@ -433,6 +436,16 @@
     if (st === 'rejected') return 'bad';
     if (st === 'claimed' || st === 'submitted') return 'working';
     return 'idle';
+  }
+
+  function artifactUrl(path) {
+    return '/api/artifact?path=' + encodeURIComponent(path);
+  }
+
+  function nodeImage(node) {
+    const details = node && node.artifact && node.artifact.details;
+    const images = details && Array.isArray(details.images) ? details.images : [];
+    return images[0] || null;
   }
 
   window.EvoTree = EvoTree;
