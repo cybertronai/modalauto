@@ -8,7 +8,7 @@ import sqlite3
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from export_real_data import build_payload, detect_db, render_js, render_runs_js, node_trace
 
@@ -334,6 +334,20 @@ class AutoresearchHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path.startswith("/experiments/"):
+            try:
+                target = (REPO_ROOT / path.lstrip("/")).resolve()
+                target.relative_to((REPO_ROOT / "experiments").resolve())
+            except (OSError, ValueError):
+                self.send_error(404)
+                return
+            if not target.exists() or not target.is_file():
+                self.send_error(404)
+                return
+            self.end_no_cache_headers(mimetypes.guess_type(str(target))[0] or "application/octet-stream")
+            self.wfile.write(target.read_bytes())
+            return
+
         if path == "/api/events":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -445,7 +459,6 @@ class AutoresearchHandler(SimpleHTTPRequestHandler):
             # LIVE real run-playback trace for one node: reads its best.ir and
             # runs the experiment's real simulator on demand. ?node=<hyp id>
             # &journal=<id> (optional, to target a specific Compare run).
-            from urllib.parse import parse_qs
             q = parse_qs(urlparse(self.path).query)
             node_id = (q.get("node") or [None])[0]
             journal = None
@@ -467,7 +480,6 @@ class AutoresearchHandler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/artifact":
-            from urllib.parse import parse_qs
             q = parse_qs(urlparse(self.path).query)
             journal = pick_journal()
             target = artifact_path_from_query(journal, (q.get("path") or [""])[0])

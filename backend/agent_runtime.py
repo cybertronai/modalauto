@@ -1445,6 +1445,17 @@ def run_verifier_step(args: argparse.Namespace) -> None:
     try:
         if workflow_domain(workflow) == "evogym":
             semantic, score, bucket_json, error = verify_evogym_submission(path, summary)
+        elif workflow_domain(workflow) == "hide_and_seek_mjwarp":
+            best = summary.get("best") if isinstance(summary, dict) else {}
+            if not isinstance(best, dict) or "score" not in best:
+                raise ValueError("missing MJWarp training score")
+            score = int(best["score"])
+            semantic = "ok"
+            bucket_json = json.dumps({
+                "mean_hider_distance_reward": best.get("mean_hider_distance_reward"),
+                "improvement": best.get("improvement"),
+                "family": best.get("family"),
+            }, sort_keys=True)
         else:
             ir = path.read_text()
             ok, message = verify_general(ir, cases=8, seed=20260530)

@@ -17,7 +17,6 @@
     return n.toLocaleString(undefined, { maximumFractionDigits });
   };
   const isMaximize = () => String((E.meta && E.meta.direction) || 'minimize').toLowerCase() === 'maximize';
-  const isMatmulDomain = () => String((E.meta && E.meta.domain) || '').toLowerCase().includes('matmul');
 
   function statusPill(st) {
     const map = { verified: 'ok', rejected: 'bad', claimed: 'working', submitted: 'working', queued: 'idle', abandoned: 'dead' };
@@ -54,20 +53,21 @@
     );
   }
 
-  function genIR(node) {
-    const m = (node.candidate.match(/(\d+)x(\d+)x(\d+)/) || [null, '4', '2', '1']);
-    return [
-      `; ${node.candidate}`,
-      `def matmul16(A,B) -> C {`,
-      `  panel = tile(${m[1]}, ${m[2]})`,
-      `  for (i,j) in panels(C, panel):`,
-      `    acc = zero(${m[1]}, ${m[2]})`,
-      `    for k in 0..16 step ${m[3]}:`,
-      `      acc = fma(A[i,k], B[k,j], acc)`,
-      node.family === 'lifetime' ? `    free_dead(T)   ; reuse` : `    ; no reuse`,
-      `    store C[i,j] = acc`,
-      `}`,
-    ].join('\n');
+  function TimelapsePreview({ media }) {
+    if (!media || !media.src) return null;
+    const src = media.src + (media.src.includes('?') ? '&' : '?') + 'ts=' + Date.now();
+    const isVideo = /\.(mp4|webm)(\?|$)/i.test(media.path || media.src);
+    return (
+      <div className="media-card">
+        {isVideo
+          ? <video className="media-preview" src={src} controls muted loop playsInline />
+          : <img className="media-preview" src={src} alt={media.label || 'timelapse'} />}
+        <div className="media-caption">
+          <span>{media.label || 'timelapse'}</span>
+          {media.path ? <span className="mono">{media.path}</span> : null}
+        </div>
+      </div>
+    );
   }
 
   function artifactUrl(path) {
@@ -165,17 +165,6 @@
     );
   }
 
-  function VerificationRecord({ node }) {
-    return (
-      <div className="well ver-rec">
-        <div>submission  <span style={{ color: 'var(--ink)' }}>{node.subId || '—'}</span></div>
-        <div>verifier    <span style={{ color: 'var(--ink)' }}>{node.verifier || '—'}</span></div>
-        <div>official    <span style={{ color: 'var(--ink)' }}>{fmt(node.score)}</span></div>
-        <div>decision    <span style={{ color: node.outcome === 'accept' ? 'var(--ok)' : node.outcome === 'reject' ? 'var(--bad)' : 'var(--ink-3)' }}>{node.outcome || 'pending'}</span></div>
-      </div>
-    );
-  }
-
   function customVisualizationContent(view, node, speed) {
     const registry = window.AutoresearchVisualizations || {};
     const Comp = registry[view.type] || (view.component ? window[view.component] : null);
@@ -187,16 +176,9 @@
     const type = view.type;
     const title = view.label || labelText(type);
     const artifact = nodeArtifact(node);
-    if (type === 'matmul_ir') {
-      return <Section key={type} title={title} defaultOpen={false}>
-        <pre className="well ir" style={{ marginBottom: 10 }}>{genIR(node)}</pre>
-        <VerificationRecord node={node} />
-      </Section>;
-    }
-    if (type === 'matmul_playback' && window.RunPlayback) {
-      return <Section key={type} title={title} defaultOpen={true}>
-        <window.RunPlayback node={node} speed={speed} />
-      </Section>;
+    const custom = customVisualizationContent(view, node, speed);
+    if (custom) {
+      return <Section key={type + ':' + (view.placement || 'inspector')} title={title} defaultOpen={view.defaultOpen !== false}>{custom}</Section>;
     }
     if (type === 'voxel_grid') {
       return <Section key={type} title={title} defaultOpen={true}>
@@ -226,8 +208,7 @@
         <ArtifactFiles artifact={artifact} />
       </Section>;
     }
-    const custom = customVisualizationContent(view, node, speed);
-    return custom ? <Section key={type} title={title} defaultOpen={view.defaultOpen !== false}>{custom}</Section> : null;
+    return null;
   }
 
   function InspectorPanel({ nodeId, T, speed, onClose, onSelect, branchSelection = [] }) {
@@ -255,6 +236,7 @@
     const deltaBad = delta == null ? false : isMaximize() ? delta < 0 : delta > 0;
     const lineage = useMemo(() => { const arr = []; let cur = node; while (cur) { arr.unshift(cur); cur = cur.parent ? E.nodes.find((n) => n.id === cur.parent) : null; } return arr; }, [nodeId]);
     const children = E.nodes.filter((n) => n.parent === node.id);
+    const timelapse = node.media && node.media.timelapse;
     const selectable = E.nodes
       .filter((n) => n.outcome === 'accept')
       .sort((a, b) => {
@@ -262,12 +244,12 @@
         const bs = b.score == null ? (isMaximize() ? -Infinity : Infinity) : b.score;
         return (isMaximize() ? bs - as : as - bs) || a.id.localeCompare(b.id);
       });
-    const configuredViews = Array.isArray(E.meta.visualizations) ? E.meta.visualizations.filter((v) => v && v.type) : [];
+    const configuredViews = Array.isArray(E.meta.visualizations)
+      ? E.meta.visualizations.filter((v) => v && v.type && !String(v.placement || 'inspector').startsWith('snapshot'))
+      : [];
     const views = configuredViews.length
       ? configuredViews
-      : isMatmulDomain()
-        ? [{ type: 'matmul_ir', label: 'Candidate IR & verification' }, { type: 'matmul_playback', label: 'Run playback' }]
-        : [{ type: 'artifact_bundle', label: 'Artifacts' }];
+      : [{ type: 'artifact_bundle', label: 'Artifacts' }];
     const visualizationSections = views.map((view) => renderVisualization(view, node, speed)).filter(Boolean);
     const postControl = async (path, payload) => {
       setControlStatus('sending...');
@@ -427,6 +409,10 @@
                 ))}
             </div>
           </Section>
+
+          {timelapse ? <Section title="Timelapse" defaultOpen={true}>
+            <TimelapsePreview media={timelapse} />
+          </Section> : null}
 
           {visualizationSections}
         </div>

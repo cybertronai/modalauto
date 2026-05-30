@@ -1,0 +1,16 @@
+{
+  "name": "openai_hide_and_seek",
+  "description": "GPU MuJoCo Warp policy-training workflow for OpenAI hide-and-seek.",
+  "domain": "hide_and_seek_mjwarp",
+  "runner": {
+    "command": "experiments/openai_hide_and_seek/scripts/autoresearch_mjwarp_runner.py",
+    "args": [
+      "--experiment-root",
+      "{experiment_root}"
+    ]
+  },
+  "paths": {
+    "journal": "journal",
+    "worktrees": "worktrees"
+  }
+}

@@ -26,7 +26,7 @@ body,
 }
 
 .hud {
-  display: none;
+  display: flex;
   position: absolute;
   z-index: 2;
   top: 20px;
@@ -57,7 +57,7 @@ h1 {
 }
 
 .phase {
-  min-width: 170px;
+  min-width: 210px;
   display: grid;
   grid-template-columns: 1fr auto;
   align-items: center;
@@ -67,6 +67,8 @@ h1 {
   background: rgba(246, 249, 251, 0.68);
   backdrop-filter: blur(10px);
   color: #29343d;
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(69, 82, 92, 0.16);
 }
 
 #phaseName {

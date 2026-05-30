@@ -9,11 +9,28 @@
   "visualizations": [
     {
       "type": "matmul_ir",
-      "label": "Candidate IR & verification"
+      "label": "Candidate IR & verification",
+      "placement": "inspector"
     },
     {
       "type": "matmul_playback",
-      "label": "Run playback"
+      "label": "Run playback",
+      "placement": "inspector"
+    },
+    {
+      "type": "matmul_metrics",
+      "label": "Energy / op",
+      "placement": "snapshot_metric"
+    },
+    {
+      "type": "matmul_playback",
+      "label": "Run playback",
+      "placement": "snapshot"
+    },
+    {
+      "type": "matmul_code",
+      "label": "Candidate code",
+      "placement": "snapshot_detail"
     }
   ],
   "runner": {

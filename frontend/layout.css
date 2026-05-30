@@ -250,6 +250,12 @@
 .voxel-swatch.v3 { background: oklch(0.58 0.13 235); }
 .voxel-swatch.v4 { background: oklch(0.61 0.12 22); }
 
+/* ---- Branch media ---- */
+.media-card { display: flex; flex-direction: column; gap: var(--sp-2); }
+.media-preview { width: 100%; max-height: 260px; object-fit: contain; background: var(--surface-inset); border: 1px solid var(--line-soft); border-radius: var(--r-md); }
+.media-caption { display: flex; justify-content: space-between; gap: var(--sp-3); color: var(--ink-3); font-size: var(--fs-tiny); }
+.media-caption .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ---- Run playback ---- */
 .run { display: flex; flex-direction: column; gap: var(--sp-3); }
 .run-grid { display: grid; grid-template-columns: repeat(16, 1fr); gap: 2px; width: 100%; aspect-ratio: 1; }
@@ -293,3 +299,54 @@
 .speed-btn.on { background: var(--surface-0); color: var(--ink); box-shadow: var(--shadow-1); }
 .jump-btn { height: 36px; }
 .jump-btn.on { border-color: color-mix(in oklch, var(--ok) 40%, var(--line)); color: var(--ok); }
+
+/* ---- Process page ---- */
+.proc-app { background: var(--bg-canvas); }
+.proc-main { min-height: 0; overflow: auto; padding: var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-5); }
+.proc-arch { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sp-4); }
+.proc-stage, .proc-card { background: var(--surface-0); border: 1px solid var(--line); border-radius: var(--r-md); box-shadow: var(--shadow-1); }
+.proc-stage { min-width: 0; display: grid; grid-template-columns: auto 1fr auto; gap: var(--sp-3); padding: var(--sp-4); }
+.proc-stage-num { width: 28px; height: 28px; display: grid; place-items: center; border-radius: var(--r-sm); background: var(--surface-inset); color: var(--ink-3); font-size: var(--fs-tiny); }
+.proc-stage-main { min-width: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.proc-stage-title { font-size: var(--fs-md); font-weight: 650; color: var(--ink); }
+.proc-role-row { display: flex; flex-wrap: wrap; gap: 5px; }
+.proc-stage-detail { color: var(--ink-2); font-size: var(--fs-tiny); line-height: 1.45; }
+.proc-stage-stat { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; color: var(--ink-3); font-size: var(--fs-micro); white-space: nowrap; }
+.proc-stage-stat .mono { color: var(--ink); font-size: var(--fs-md); font-weight: 650; }
+.proc-grid { display: grid; grid-template-columns: 1fr 1fr 1.35fr; gap: var(--sp-5); align-items: start; }
+.proc-card { min-width: 0; overflow: hidden; }
+.proc-card-head { height: 44px; padding: 0 var(--sp-4); border-bottom: 1px solid var(--line-soft); display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); }
+.proc-card-head h3 { margin: 0; font-size: var(--fs-sm); font-weight: 650; color: var(--ink); }
+.proc-card-head .mono { font-size: var(--fs-tiny); color: var(--ink-3); }
+.proc-pool-grid { padding: var(--sp-3); display: grid; gap: var(--sp-3); }
+.proc-pool { border: 1px solid var(--line-soft); border-radius: var(--r-sm); background: var(--surface-inset); padding: var(--sp-3); }
+.proc-pool-head { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; font-size: var(--fs-tiny); font-weight: 650; color: var(--ink); margin-bottom: 7px; }
+.proc-pool-dot, .proc-event-dot { width: 7px; height: 7px; border-radius: 50%; }
+.proc-agent { display: flex; justify-content: space-between; gap: var(--sp-3); padding: 4px 0; font-size: var(--fs-micro); color: var(--ink-2); }
+.proc-agent span { color: var(--ink-faint); }
+.proc-queue-bars { padding: var(--sp-3); display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sp-2); }
+.proc-q { min-width: 0; padding: var(--sp-3); border: 1px solid var(--line-soft); border-radius: var(--r-sm); background: var(--surface-inset); display: flex; flex-direction: column; gap: 4px; }
+.proc-q span { font-size: var(--fs-micro); color: var(--ink-3); text-transform: uppercase; }
+.proc-q b { font-size: var(--fs-md); color: var(--ink); }
+.proc-work-list, .proc-event-list { padding: 0 var(--sp-3) var(--sp-3); display: flex; flex-direction: column; gap: 4px; max-height: 520px; overflow: auto; }
+.proc-work { display: grid; grid-template-columns: 110px 1fr auto; gap: var(--sp-3); align-items: center; padding: 8px; border-radius: var(--r-sm); background: var(--surface-1); font-size: var(--fs-tiny); }
+.proc-work .mono { color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; }
+.proc-work span:nth-child(2) { color: var(--ink-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proc-work b { color: var(--ink-3); font-size: var(--fs-micro); font-weight: 600; }
+.proc-empty { color: var(--ink-3); font-size: var(--fs-tiny); padding: var(--sp-4); }
+.proc-events { min-height: 0; }
+.proc-event { display: grid; grid-template-columns: 8px 42px 76px 1fr; gap: 8px; align-items: baseline; padding: 7px 8px; border-radius: var(--r-sm); background: var(--surface-1); min-width: 0; }
+.proc-event-time { color: var(--ink-faint); font-size: var(--fs-micro); }
+.proc-event-kind { color: var(--accent); font-size: var(--fs-micro); text-transform: uppercase; font-weight: 650; overflow: hidden; text-overflow: ellipsis; }
+.proc-event-body { color: var(--ink-1); font-size: var(--fs-tiny); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.proc-scrub { display: flex; align-items: center; gap: var(--sp-4); }
+.proc-track { position: relative; flex: 1; height: 30px; border: 1px solid var(--line-soft); border-radius: var(--r-sm); background: var(--surface-inset); cursor: pointer; overflow: hidden; }
+.proc-track-fill { position: absolute; inset: 0 auto 0 0; background: color-mix(in oklch, var(--accent) 10%, transparent); border-right: 1px solid color-mix(in oklch, var(--accent) 45%, transparent); }
+.proc-track-head { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--accent); transform: translateX(-1px); }
+.proc-time { color: var(--ink-3); font-size: var(--fs-tiny); white-space: nowrap; }
+
+@media (max-width: 1100px) {
+  .proc-arch, .proc-grid { grid-template-columns: 1fr; }
+  .proc-stage { grid-template-columns: auto 1fr; }
+  .proc-stage-stat { grid-column: 2; align-items: flex-start; }
+}

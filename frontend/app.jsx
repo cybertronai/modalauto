@@ -287,6 +287,7 @@
             <nav className="nav-tabs">
               <a className="nav-tab active" href="index.html">Tree</a>
               <a className="nav-tab" href="compare.html">Compare</a>
+              <a className="nav-tab" href="process.html">Process</a>
             </nav>
             <div className="prob">
               <span className="prob-name">{E.meta.problem}</span>

@@ -2,6 +2,37 @@
 
 Core orchestration code for running agentic research loops against reproducible experiment folders.
 
+## Setup
+
+Use Python 3.10+ from the parent directory of this package, or run the provided `bin/` entrypoints from this repository root. The entrypoints add the package parent to `PYTHONPATH` so imports like `autoresearch.backend...` resolve through the top-level `__init__.py`.
+
+```bash
+git clone <repo-url> autoresearch
+cd autoresearch
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+```
+
+The core autoresearch loop and the `matmul` reference experiment use only the Python standard library. No package install is required for the default run as long as commands are launched through `bin/`.
+
+If you call modules directly instead of using `bin/`, expose the parent directory:
+
+```bash
+export PYTHONPATH="$(pwd)/..:${PYTHONPATH:-}"
+python -m autoresearch.backend.team_journal --experiment matmul init
+```
+
+The frontend app is served by Python and loads React/Babel from the browser, so `npm install` is not required to view the live dashboard. Install Node dependencies only when running browser tests or Playwright-based checks:
+
+```bash
+cd frontend
+npm install
+cd ..
+```
+
+Experiment-specific environments may need their own dependencies. Keep those instructions inside `experiments/<name>/README.md` and keep generated virtualenvs, caches, journals, and worktrees out of Git.
+
 ## Layout
 
 The repository root is split by responsibility:
@@ -167,6 +198,21 @@ Expected output shape:
   "elapsed_seconds": 1.23
 }
 ```
+
+Optional branch media can be returned in the same summary. Use this when an experiment can render a small timelapse GIF/video, rollout clip, plot animation, or other visual run preview for a candidate:
+
+```json
+{
+  "media": {
+    "timelapse": {
+      "path": "timelapse.gif",
+      "label": "candidate rollout"
+    }
+  }
+}
+```
+
+`path` may be relative to the run artifact directory, relative to the experiment journal, or an absolute path inside the experiment journal. The frontend exposes it on the branch as `node.media.timelapse` and serves local files through `/api/media?node=<hypothesis_id>&kind=timelapse`.
 
 The reference matmul runner lives at `experiments/matmul/loop.py` and writes:
 

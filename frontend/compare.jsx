@@ -4,7 +4,7 @@
    snapshots showing how each branch's algorithm actually executes. Right: the
    branch diff panel. Click any node to reassign the active branch. */
 (function () {
-  const { useState, useRef, useMemo, Fragment } = React;
+  const { useState, useRef, useMemo } = React;
   const RUNS = window.EVO_RUNS;
   const BY = window.EVO_RUN_BY_ID;
   const fmt = (n) => {
@@ -18,7 +18,6 @@
   const mmss = (t) => String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(Math.round(t % 60)).padStart(2, '0');
   const fitVar = (f) => `var(--fit-${f})`;
   const isMaximize = (world) => String((world.meta && world.meta.direction) || 'minimize').toLowerCase() === 'maximize';
-  const isMatmulDomain = (world) => String((world.meta && world.meta.domain) || '').toLowerCase().includes('matmul');
   const betterScore = (world, a, b) => isMaximize(world) ? b.score - a.score : a.score - b.score;
   const parentOf = (node) => node && (node.displayParent || node.parent);
 
@@ -73,13 +72,6 @@
     const b = acc.find((n) => n.id !== best.id) || best;
     return { a: best.id, b: b.id };
   }
-  function genIR(node) {
-    const m = (node.candidate.match(/(\d+)x(\d+)x(\d+)/) || [null, '4', '2', '1']);
-    return [`; ${node.candidate}`, `panel = tile(${m[1]}, ${m[2]})`, `for (i,j) in panels(C, panel):`,
-      `  acc = zero(${m[1]}, ${m[2]})`, `  for k in 0..16 step ${m[3]}:`, `    acc = fma(A[i,k], B[k,j], acc)`,
-      node.family === 'lifetime' ? `  free_dead(T)   ; reuse` : `  ; no lifetime reuse`, `  store C[i,j] = acc`].join('\n');
-  }
-
   // ---- main evolution tree with two highlighted branches ----
   function EvoTreeTwo({ world, aNode, bNode, cA, cB, active, onPick }) {
     const W = 1320, H = 640, pad = 54;
@@ -296,8 +288,11 @@
   }
 
   function CustomVisualizations({ node, world, speed }) {
-    const known = new Set(['matmul_ir', 'matmul_playback', 'voxel_grid', 'metrics', 'media', 'artifact_media', 'rollout_media', 'artifact_files', 'artifact_bundle']);
-    const views = ((world.meta && world.meta.visualizations) || []).filter((view) => view && !known.has(view.type));
+    const known = new Set(['voxel_grid', 'metrics', 'media', 'artifact_media', 'rollout_media', 'artifact_files', 'artifact_bundle']);
+    const views = ((world.meta && world.meta.visualizations) || []).filter((view) => {
+      if (!view || known.has(view.type)) return false;
+      return !['inspector', 'snapshot', 'snapshot_metric'].includes(view.placement);
+    });
     const registry = window.AutoresearchVisualizations || {};
     return views.map((view) => {
       const Comp = registry[view.type] || (view.component ? window[view.component] : null);
@@ -330,14 +325,23 @@
     );
   }
 
+  function SnapshotVisualizations({ node, world, speed, placement }) {
+    const registry = window.AutoresearchVisualizations || {};
+    return ((world.meta && world.meta.visualizations) || [])
+      .filter((view) => view && view.placement === placement)
+      .map((view) => {
+        const Comp = registry[view.type] || (view.component ? window[view.component] : null);
+        if (!Comp) return null;
+        return <Comp key={view.type + ':' + placement} node={node} view={view} app={world} speed={speed} artifactUrl={artifactUrl} fmt={fmt} />;
+      });
+  }
+
   function RunSnapshot({ label, color, node, world, speed }) {
     const p = parentOf(node);
     const parent = p ? world.nodes.find((n) => n.id === p) : null;
     const d = parent && parent.score != null && node.score != null ? node.score - parent.score : null;
     const deltaGood = d == null ? false : isMaximize(world) ? d > 0 : d < 0;
     const deltaBad = d == null ? false : isMaximize(world) ? d < 0 : d > 0;
-    const RunPlayback = window.RunPlayback;
-    const showMatmul = isMatmulDomain(world) && RunPlayback;
     const metric = world.meta.metric || 'score';
     return (
       <div className="snap">
@@ -353,23 +357,12 @@
         <div className="snap-metrics">
           <div className="snap-m"><span className="snap-mk">{metric}</span><span className="snap-mv mono">{fmt(node.score)}</span></div>
           <div className="snap-m"><span className="snap-mk">Δ step</span><span className="snap-mv mono" style={{ color: d == null ? 'var(--ink-3)' : deltaGood ? 'var(--ok)' : deltaBad ? 'var(--bad)' : 'var(--ink-3)' }}>{d == null ? '—' : (d < 0 ? '▼ ' : '▲ ') + fmt(Math.abs(d))}</span></div>
+          <SnapshotVisualizations node={node} world={world} speed={speed} placement="snapshot_metric" />
           <div className="snap-m"><span className="snap-mk">family</span><span className="snap-mv mono">{node.family}</span></div>
         </div>
-        {showMatmul ? <div className="snap-run-wrap"><RunPlayback node={node} speed={speed} key={node.id} /></div> : null}
+        <div className="snap-run-wrap"><SnapshotVisualizations node={node} world={world} speed={speed} placement="snapshot" /></div>
         <ArtifactSummary node={node} world={world} speed={speed} />
-        {/* Real submitted code when available (from the journal artifact); fall
-            back to a representative IR only for mock/codeless nodes. */}
-        {showMatmul && node.code ? (
-          <Fragment>
-            <div className="block-label" style={{ margin: '4px 0 6px' }}>{'candidate code · ' + (node.codeLang || 'python')}</div>
-            <pre className="well ir">{node.code}</pre>
-          </Fragment>
-        ) : showMatmul ? (
-          <Fragment>
-            <div className="block-label" style={{ margin: '4px 0 6px' }}>candidate IR · representative</div>
-            <pre className="well ir">{genIR(node)}</pre>
-          </Fragment>
-        ) : null}
+        <SnapshotVisualizations node={node} world={world} speed={speed} placement="snapshot_detail" />
       </div>
     );
   }
@@ -480,13 +473,14 @@
             <nav className="nav-tabs">
               <a className="nav-tab" href="index.html">Tree</a>
               <a className="nav-tab active" href="compare.html">Compare</a>
+              <a className="nav-tab" href="process.html">Process</a>
             </nav>
             <div className="prob">
               <span className="prob-name">Compare branches</span>
               <label className="run-pick inline">
                 <span className="rp-side">evolution</span>
                 <select value={runId} onChange={(e) => setRunId(e.target.value)}>
-                  {RUNS.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
+                  {RUNS.map((r, i) => <option key={r.id + ':' + i} value={r.id}>{r.label}</option>)}
                 </select>
               </label>
             </div>
