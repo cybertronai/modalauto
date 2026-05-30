@@ -49,6 +49,56 @@ def pick_journal(configured: Path | None = None) -> Path | None:
     return max(candidates, key=journal_mtime_ns) if candidates else None
 
 
+def journal_id(journal: Path) -> str:
+    return journal.parent.name if journal.name == "journal" else journal.name
+
+
+def run_label(journal: Path) -> str:
+    name = journal_id(journal)
+    return name.replace("_", " ").replace("-", " ").title() if name else "Main Run"
+
+
+def discover_journals(configured: Path | None = None) -> list[Path]:
+    if configured:
+        journal = configured.expanduser().resolve()
+        return [journal] if detect_db(journal).exists() else []
+    env = os.environ.get("FRONTEND_JOURNAL")
+    if env:
+        journal = Path(env).expanduser().resolve()
+        return [journal] if detect_db(journal).exists() else []
+    candidates = [path for path in (AUTORESEARCH_ROOT / "experiments").glob("*/journal") if detect_db(path).exists()]
+    return sorted(candidates, key=journal_mtime_ns, reverse=True)
+
+
+def select_journal(query: str, configured: Path | None = None) -> Path | None:
+    selected = (parse_qs(query).get("journal") or parse_qs(query).get("task") or [None])[0]
+    if selected:
+        for journal in discover_journals(configured):
+            if selected in {journal_id(journal), journal.name, journal.parent.name}:
+                return journal
+        return None
+    return pick_journal(configured)
+
+
+def build_tasks(journals: list[Path], selected: Path | None = None) -> list[dict]:
+    tasks = []
+    for journal in journals:
+        payload = build_payload(journal)
+        meta = payload.get("meta", {})
+        best = meta.get("best")
+        desc = f"{meta.get('totalNodes', 0)} hypotheses"
+        if best is not None:
+            desc += f" · best {best:,}"
+        tasks.append({
+            "id": journal_id(journal),
+            "label": run_label(journal),
+            "desc": desc,
+            "journal": str(journal),
+            "selected": bool(selected and journal.resolve() == selected.resolve()),
+        })
+    return tasks
+
+
 class Handler(BaseHTTPRequestHandler):
     journal: Path | None = None
 
@@ -71,10 +121,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
-        if path not in {"/api/data", "/api/status", "/api/trace", "/api/artifact"}:
+        if path not in {"/api/data", "/api/status", "/api/tasks", "/api/trace", "/api/artifact"}:
             self.send_json({"error": "not_found"}, 404)
             return
-        journal = pick_journal(self.journal)
+        journal = select_journal(parsed.query, self.journal)
+        if path == "/api/tasks":
+            self.send_json({"selected": journal_id(journal) if journal else None, "tasks": build_tasks(discover_journals(self.journal), journal)})
+            return
         if not journal:
             self.send_json({"journal": None, "payload": None, "error": "no_journal"})
             return
