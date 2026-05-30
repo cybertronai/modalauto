@@ -4,7 +4,7 @@
    snapshots showing how each branch's algorithm actually executes. Right: the
    branch diff panel. Click any node to reassign the active branch. */
 (function () {
-  const { useState, useRef, useMemo, Fragment } = React;
+  const { useState, useRef, useMemo, useEffect, useCallback } = React;
   const RUNS = window.EVO_RUNS;
   const BY = window.EVO_RUN_BY_ID;
   const fmt = (n) => {
@@ -78,6 +78,72 @@
     return [`; ${node.candidate}`, `panel = tile(${m[1]}, ${m[2]})`, `for (i,j) in panels(C, panel):`,
       `  acc = zero(${m[1]}, ${m[2]})`, `  for k in 0..16 step ${m[3]}:`, `    acc = fma(A[i,k], B[k,j], acc)`,
       node.family === 'lifetime' ? `  free_dead(T)   ; reuse` : `  ; no lifetime reuse`, `  store C[i,j] = acc`].join('\n');
+  }
+
+  const SECTION_ORDER = ['summary', 'playback', 'rollout', 'body', 'evaluation', 'run-record', 'artifacts', 'preview', 'code', 'ir'];
+  function sectionRank(key) {
+    const idx = SECTION_ORDER.indexOf(key);
+    if (idx >= 0) return idx;
+    if (String(key || '').startsWith('custom:')) return SECTION_ORDER.indexOf('run-record') + 0.5;
+    return SECTION_ORDER.length;
+  }
+  function clamp(n, lo, hi) {
+    return Math.max(lo, Math.min(hi, n));
+  }
+  function syncSections(scroller) {
+    if (!scroller) return [];
+    const base = scroller.getBoundingClientRect();
+    const sections = Array.from(scroller.querySelectorAll('[data-sync-section]')).map((el) => {
+      const rect = el.getBoundingClientRect();
+      return {
+        key: el.getAttribute('data-sync-section'),
+        top: Math.max(0, rect.top - base.top + scroller.scrollTop),
+      };
+    }).filter((s) => s.key);
+    sections.sort((a, b) => a.top - b.top);
+    if (sections.length) sections[0].top = 0;
+    return sections;
+  }
+  function scrollState(scroller) {
+    const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    const sections = syncSections(scroller);
+    if (!sections.length) {
+      return { key: null, rank: 0, progress: maxScroll ? scroller.scrollTop / maxScroll : 0 };
+    }
+    const y = scroller.scrollTop;
+    let idx = 0;
+    if (maxScroll > 0 && y >= maxScroll - 2) {
+      idx = sections.length - 1;
+    } else {
+      for (let i = 0; i < sections.length; i += 1) {
+        if (sections[i].top <= y + 2) idx = i;
+        else break;
+      }
+    }
+    const start = sections[idx].top;
+    const nextTop = idx + 1 < sections.length ? sections[idx + 1].top : maxScroll;
+    const end = Math.max(start, Math.min(nextTop, maxScroll));
+    const span = Math.max(1, end - start);
+    return {
+      key: sections[idx].key,
+      rank: sectionRank(sections[idx].key),
+      progress: clamp((y - start) / span, 0, 1),
+    };
+  }
+  function scrollTopForState(scroller, state) {
+    const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    const sections = syncSections(scroller);
+    if (!sections.length || !state) return maxScroll * (state && state.progress ? state.progress : 0);
+    let idx = sections.findIndex((s) => s.key === state.key);
+    if (idx < 0) {
+      idx = sections
+        .map((s, i) => ({ i, d: Math.abs(sectionRank(s.key) - state.rank) }))
+        .sort((a, b) => a.d - b.d || a.i - b.i)[0].i;
+    }
+    const start = sections[idx].top;
+    const nextTop = idx + 1 < sections.length ? sections[idx + 1].top : maxScroll;
+    const end = Math.max(start, Math.min(nextTop, maxScroll));
+    return clamp(start + state.progress * Math.max(1, end - start), 0, maxScroll);
   }
 
   // ---- main evolution tree with two highlighted branches ----
@@ -202,10 +268,10 @@
     return String(value || '').replace(/_/g, ' ');
   }
 
-  function SnapBlock({ title, children }) {
+  function SnapBlock({ title, section, children }) {
     if (!children) return null;
     return (
-      <div className="snap-block">
+      <div className="snap-block" data-sync-section={section || labelText(title)}>
         <div className="block-label">{title}</div>
         {children}
       </div>
@@ -302,7 +368,7 @@
     return views.map((view) => {
       const Comp = registry[view.type] || (view.component ? window[view.component] : null);
       if (!Comp) return null;
-      return <SnapBlock key={view.type} title={view.label || labelText(view.type)}>
+      return <SnapBlock key={view.type} section={'custom:' + view.type} title={view.label || labelText(view.type)}>
         <Comp node={node} view={view} app={world} speed={speed} artifactUrl={artifactUrl} fmt={fmt} />
       </SnapBlock>;
     });
@@ -319,18 +385,18 @@
     const hasFiles = artifact.files && artifact.files.length;
     return (
       <div className="artifact-view snap-artifacts">
-        {hasMedia ? <SnapBlock title="rollout"><ArtifactMedia artifact={artifact} /></SnapBlock> : null}
-        {hasBody ? <SnapBlock title="body"><VoxelMini artifact={artifact} /></SnapBlock> : null}
-        {hasMetrics ? <SnapBlock title="evaluation"><ArtifactMetrics artifact={artifact} /></SnapBlock> : null}
-        <SnapBlock title="run record"><RunRecord node={node} /></SnapBlock>
+        {hasMedia ? <SnapBlock section="rollout" title="rollout"><ArtifactMedia artifact={artifact} /></SnapBlock> : null}
+        {hasBody ? <SnapBlock section="body" title="body"><VoxelMini artifact={artifact} /></SnapBlock> : null}
+        {hasMetrics ? <SnapBlock section="evaluation" title="evaluation"><ArtifactMetrics artifact={artifact} /></SnapBlock> : null}
+        <SnapBlock section="run-record" title="run record"><RunRecord node={node} /></SnapBlock>
         <CustomVisualizations node={node} world={world} speed={speed} />
-        {hasFiles ? <SnapBlock title="artifacts"><ArtifactFiles artifact={artifact} /></SnapBlock> : null}
-        {artifact.preview ? <SnapBlock title="preview"><pre className="artifact-preview">{artifact.preview}</pre></SnapBlock> : null}
+        {hasFiles ? <SnapBlock section="artifacts" title="artifacts"><ArtifactFiles artifact={artifact} /></SnapBlock> : null}
+        {artifact.preview ? <SnapBlock section="preview" title="preview"><pre className="artifact-preview">{artifact.preview}</pre></SnapBlock> : null}
       </div>
     );
   }
 
-  function RunSnapshot({ label, color, node, world, speed }) {
+  function RunSnapshot({ label, color, node, world, speed, snapRef, onScroll }) {
     const p = parentOf(node);
     const parent = p ? world.nodes.find((n) => n.id === p) : null;
     const d = parent && parent.score != null && node.score != null ? node.score - parent.score : null;
@@ -340,35 +406,37 @@
     const showMatmul = isMatmulDomain(world) && RunPlayback;
     const metric = world.meta.metric || 'score';
     return (
-      <div className="snap">
-        <div className="snap-head">
-          <div className="snap-titlerow">
-            <span className="mt-dot" style={{ background: color }} />
-            <span className="snap-run" style={{ color }}>{label}</span>
-            <span className="snap-gen mono">{node.id + ' · gen ' + node.gen}</span>
+      <div className="snap" ref={snapRef} onScroll={onScroll}>
+        <div className="snap-summary" data-sync-section="summary">
+          <div className="snap-head">
+            <div className="snap-titlerow">
+              <span className="mt-dot" style={{ background: color }} />
+              <span className="snap-run" style={{ color }}>{label}</span>
+              <span className="snap-gen mono">{node.id + ' · gen ' + node.gen}</span>
+            </div>
+            <div className="snap-title">{node.gen === 0 ? 'Baseline IR' : node.title}</div>
+            <div className="snap-cand mono">{node.candidate}</div>
           </div>
-          <div className="snap-title">{node.gen === 0 ? 'Baseline IR' : node.title}</div>
-          <div className="snap-cand mono">{node.candidate}</div>
+          <div className="snap-metrics">
+            <div className="snap-m"><span className="snap-mk">{metric}</span><span className="snap-mv mono">{fmt(node.score)}</span></div>
+            <div className="snap-m"><span className="snap-mk">Δ step</span><span className="snap-mv mono" style={{ color: d == null ? 'var(--ink-3)' : deltaGood ? 'var(--ok)' : deltaBad ? 'var(--bad)' : 'var(--ink-3)' }}>{d == null ? '—' : (d < 0 ? '▼ ' : '▲ ') + fmt(Math.abs(d))}</span></div>
+            <div className="snap-m"><span className="snap-mk">family</span><span className="snap-mv mono">{node.family}</span></div>
+          </div>
         </div>
-        <div className="snap-metrics">
-          <div className="snap-m"><span className="snap-mk">{metric}</span><span className="snap-mv mono">{fmt(node.score)}</span></div>
-          <div className="snap-m"><span className="snap-mk">Δ step</span><span className="snap-mv mono" style={{ color: d == null ? 'var(--ink-3)' : deltaGood ? 'var(--ok)' : deltaBad ? 'var(--bad)' : 'var(--ink-3)' }}>{d == null ? '—' : (d < 0 ? '▼ ' : '▲ ') + fmt(Math.abs(d))}</span></div>
-          <div className="snap-m"><span className="snap-mk">family</span><span className="snap-mv mono">{node.family}</span></div>
-        </div>
-        {showMatmul ? <div className="snap-run-wrap"><RunPlayback node={node} speed={speed} key={node.id} /></div> : null}
+        {showMatmul ? <div className="snap-run-wrap" data-sync-section="playback"><RunPlayback node={node} speed={speed} key={node.id} /></div> : null}
         <ArtifactSummary node={node} world={world} speed={speed} />
         {/* Real submitted code when available (from the journal artifact); fall
             back to a representative IR only for mock/codeless nodes. */}
         {showMatmul && node.code ? (
-          <Fragment>
+          <div data-sync-section="code">
             <div className="block-label" style={{ margin: '4px 0 6px' }}>{'candidate code · ' + (node.codeLang || 'python')}</div>
             <pre className="well ir">{node.code}</pre>
-          </Fragment>
+          </div>
         ) : showMatmul ? (
-          <Fragment>
+          <div data-sync-section="ir">
             <div className="block-label" style={{ margin: '4px 0 6px' }}>candidate IR · representative</div>
             <pre className="well ir">{genIR(node)}</pre>
-          </Fragment>
+          </div>
         ) : null}
       </div>
     );
@@ -435,6 +503,27 @@
     const nodeA = world.nodes.find((n) => n.id === aNode) || world.nodes[0];
     const nodeB = world.nodes.find((n) => n.id === bNode) || world.nodes[0];
     const onPick = (id) => { if (active === 'a') setANode(id); else setBNode(id); };
+    const snapARef = useRef(null);
+    const snapBRef = useRef(null);
+    const syncLock = useRef(false);
+    const syncSnapshotScroll = useCallback((side) => {
+      if (syncLock.current) return;
+      const source = side === 'a' ? snapARef.current : snapBRef.current;
+      const target = side === 'a' ? snapBRef.current : snapARef.current;
+      if (!source || !target) return;
+      const state = scrollState(source);
+      const nextTop = scrollTopForState(target, state);
+      syncLock.current = true;
+      target.scrollTop = nextTop;
+      requestAnimationFrame(() => { syncLock.current = false; });
+    }, []);
+    useEffect(() => {
+      if (!snapARef.current || !snapBRef.current) return;
+      syncLock.current = true;
+      snapARef.current.scrollTop = 0;
+      snapBRef.current.scrollTop = 0;
+      requestAnimationFrame(() => { syncLock.current = false; });
+    }, [runId, aNode, bNode]);
 
     // divergence stats
     const arrA = lineageArr(world, aNode), arrB = lineageArr(world, bNode);
@@ -501,8 +590,8 @@
           <div className="evo-main">
             <EvoTreeTwo world={world} aNode={aNode} bNode={bNode} cA={cA} cB={cB} active={active} onPick={onPick} />
             <div className="evo-snaps">
-              <RunSnapshot label="Branch A" color={cA} node={nodeA} world={world} speed={1} />
-              <RunSnapshot label="Branch B" color={cB} node={nodeB} world={world} speed={1} />
+              <RunSnapshot label="Branch A" color={cA} node={nodeA} world={world} speed={1} snapRef={snapARef} onScroll={() => syncSnapshotScroll('a')} />
+              <RunSnapshot label="Branch B" color={cB} node={nodeB} world={world} speed={1} snapRef={snapBRef} onScroll={() => syncSnapshotScroll('b')} />
             </div>
           </div>
 
