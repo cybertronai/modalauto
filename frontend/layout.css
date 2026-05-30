@@ -43,6 +43,7 @@
 @keyframes nodepulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 
 .tree-tip { position: absolute; z-index: 20; pointer-events: none; background: var(--surface-0); border: 1px solid var(--line); border-radius: var(--r-md); box-shadow: var(--shadow-2); padding: 9px 11px; min-width: 168px; max-width: 240px; }
+.tree-tip .tt-media { display: block; width: 100%; aspect-ratio: 3 / 2; object-fit: contain; margin: 7px 0 6px; border: 1px solid var(--line-soft); border-radius: var(--r-sm); background: var(--surface-inset); }
 .tt-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); margin-bottom: 5px; }
 .tt-id { font-size: var(--fs-tiny); color: var(--ink-2); }
 .tt-title { font-size: var(--fs-sm); font-weight: 500; color: var(--ink); line-height: 1.35; margin-bottom: 4px; }
