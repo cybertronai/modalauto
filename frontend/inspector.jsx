@@ -70,8 +70,9 @@
     ].join('\n');
   }
 
-  function artifactUrl(path) {
-    return '/api/artifact?path=' + encodeURIComponent(path);
+  function artifactUrl(path, file = null) {
+    const version = file && file.size != null ? '&v=' + encodeURIComponent(file.size) : '';
+    return '/api/artifact?path=' + encodeURIComponent(path) + version;
   }
 
   function valueText(value) {
@@ -138,7 +139,7 @@
         <ArtifactMedia artifact={artifact} empty={null} />
         <div className="artifact-files">
           {files.map((file) => (
-            <a key={file.path} className="artifact-file" href={artifactUrl(file.path)} target="_blank" rel="noreferrer">
+            <a key={file.path} className="artifact-file" href={artifactUrl(file.path, file)} target="_blank" rel="noreferrer">
               <span className="artifact-kind">{file.kind}</span>
               <span className="artifact-name">{file.name}</span>
               {file.size != null ? <span className="artifact-size">{fmt(file.size) + ' B'}</span> : null}
@@ -151,15 +152,19 @@
   }
 
   function ArtifactMedia({ artifact, empty = <div className="insp-meta">No media artifact.</div> }) {
-    const images = artifact && Array.isArray(artifact.images) ? artifact.images : [];
-    const videos = artifact && Array.isArray(artifact.videos) ? artifact.videos : [];
+    const primary = artifact && artifact.primaryMedia;
+    const imageItems = artifact && Array.isArray(artifact.images) ? artifact.images : [];
+    const videoItems = artifact && Array.isArray(artifact.videos) ? artifact.videos : [];
+    const first = (items) => primary ? items.slice().sort((a, b) => (a.path === primary.path ? -1 : b.path === primary.path ? 1 : 0)) : items;
+    const images = first(imageItems);
+    const videos = first(videoItems);
     if (!images.length && !videos.length) return empty;
     const solo = images.length + videos.length === 1;
     return (
       <div className={'artifact-media' + (solo ? ' solo' : '')}>
-        {videos.map((file) => <video key={file.path} src={artifactUrl(file.path)} controls muted loop playsInline />)}
-        {images.map((file) => <a key={file.path} href={artifactUrl(file.path)} target="_blank" rel="noreferrer">
-          <img src={artifactUrl(file.path)} alt={file.name} />
+        {videos.map((file) => <video key={file.path} src={artifactUrl(file.path, file)} controls muted loop playsInline />)}
+        {images.map((file) => <a key={file.path} href={artifactUrl(file.path, file)} target="_blank" rel="noreferrer">
+          <img src={artifactUrl(file.path, file)} alt={file.name} />
         </a>)}
       </div>
     );

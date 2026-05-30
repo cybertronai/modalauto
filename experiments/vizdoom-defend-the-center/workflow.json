@@ -1,0 +1,39 @@
+{
+  "name": "vizdoom-defend-the-center",
+  "description": "ViZDoom Defend the Center scenario policy search. Direction: maximize mean total episode reward on the parent ViZDoom checkout's scenarios/defend_the_center.cfg task.",
+  "domain": "vizdoom",
+  "direction": "maximize",
+  "primary_metric": "mean_total_reward",
+  "baseline": 0,
+  "target": 20,
+  "stochastic": false,
+  "visualizations": [
+    {
+      "type": "metrics",
+      "label": "Episode rewards"
+    },
+    {
+      "type": "artifact_media",
+      "label": "Approach GIF"
+    },
+    {
+      "type": "artifact_files",
+      "label": "Artifacts"
+    }
+  ],
+  "runner": {
+    "command": "experiments/vizdoom-defend-the-center/loop.py",
+    "args": [
+      "--experiment-root",
+      "{experiment_root}",
+      "--vizdoom-root",
+      "{experiment_root}/../../.."
+    ]
+  },
+  "paths": {
+    "journal": "journal",
+    "worktrees": "worktrees"
+  },
+  "venv": "/Users/seneca/Coding/ViZDoom/.venv",
+  "venv_reason": "use the sibling ViZDoom checkout's Python environment and locally built vizdoom package"
+}

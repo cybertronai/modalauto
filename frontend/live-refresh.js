@@ -1,7 +1,13 @@
 (function () {
   const params = new URLSearchParams(window.location.search);
   if (params.get('live') === '0') return;
-  if ('EventSource' in window && params.get('sse') !== '0') return;
+
+  if ('EventSource' in window && params.get('sse') !== '0') {
+    const source = new EventSource('/api/dev-events');
+    source.addEventListener('reload', () => window.location.reload());
+    source.onerror = () => {};
+    return;
+  }
 
   let currentHash = null;
   let currentFrames = null;

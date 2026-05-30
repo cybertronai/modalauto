@@ -19,6 +19,7 @@ DEFAULT_AUTORESEARCH = AUTORESEARCH_ROOT
 CHANGELOG_NAME = "frontend_changelog.jsonl"
 WATCH_TABLES = ["agents", "hypotheses", "submissions", "verifications", "manager_events"]
 CONTROL_TABLES = ["branch_controls", "control_actions"]
+FRONTEND_WATCH_EXTS = {".html", ".css", ".js", ".jsx"}
 
 
 def pick_journal():
@@ -121,6 +122,15 @@ def db_signature(journal):
     db = detect_db(journal)
     counts = {}
     version = 0
+    media = []
+    artifacts = journal / "artifacts"
+    if artifacts.exists():
+        for path in sorted(artifacts.glob("**/*.gif")):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            media.append([str(path.relative_to(journal)), stat.st_size, stat.st_mtime_ns])
     try:
         con = sqlite3.connect(db)
         ensure_frontend_hooks(con)
@@ -133,9 +143,24 @@ def db_signature(journal):
     raw = json.dumps({
         "journal": str(journal),
         "counts": counts,
+        "media": media,
         "version": version,
     }, sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()[:16], counts
+
+
+def frontend_signature():
+    root = Path(__file__).resolve().parents[1]
+    parts = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix not in FRONTEND_WATCH_EXTS:
+            continue
+        if any(part in {"dist", "node_modules"} for part in path.relative_to(root).parts):
+            continue
+        stat = path.stat()
+        parts.append((str(path.relative_to(root)), stat.st_mtime_ns, stat.st_size))
+    raw = json.dumps(parts, separators=(",", ":"))
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 def ensure_frontend_hooks(con):
@@ -278,6 +303,14 @@ def artifact_path_from_query(journal, raw_path):
     return target if target.exists() and target.is_file() else None
 
 
+def artifact_path_from_any_journal(raw_path):
+    for journal in discover_journals():
+        target = artifact_path_from_query(journal, raw_path)
+        if target:
+            return target
+    return None
+
+
 def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -409,6 +442,34 @@ class AutoresearchHandler(SimpleHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError, OSError):
                 return
 
+        if path == "/api/dev-events":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, max-age=0")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            last_hash = frontend_signature()
+            last_heartbeat = time.time()
+            try:
+                while True:
+                    now = time.time()
+                    current_hash = frontend_signature()
+                    if current_hash != last_hash:
+                        payload = {"hash": current_hash}
+                        self.wfile.write(b"event: reload\n")
+                        self.wfile.write(f"data: {json.dumps(payload, separators=(',', ':'))}\n\n".encode("utf-8"))
+                        self.wfile.flush()
+                        last_hash = current_hash
+                        last_heartbeat = now
+                    elif now - last_heartbeat >= 15:
+                        self.wfile.write(b": heartbeat\n\n")
+                        self.wfile.flush()
+                        last_heartbeat = now
+                    time.sleep(0.5)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+
         if path == "/real-data.js":
             journal = journal_from_request(self)
             self.end_no_cache_headers("text/javascript; charset=utf-8")
@@ -513,8 +574,7 @@ class AutoresearchHandler(SimpleHTTPRequestHandler):
         if path == "/api/artifact":
             from urllib.parse import parse_qs
             q = parse_qs(urlparse(self.path).query)
-            journal = pick_journal()
-            target = artifact_path_from_query(journal, (q.get("path") or [""])[0])
+            target = artifact_path_from_any_journal((q.get("path") or [""])[0])
             if not target:
                 self.send_error(404)
                 return

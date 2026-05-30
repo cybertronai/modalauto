@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ViZDoom Basic autoresearch runner.
 
-Evaluates simple policy candidates on the parent ViZDoom checkout's Basic task
+Evaluates simple policy candidates on a parent ViZDoom checkout scenario
 and writes the same journal/artifact shape as the other modalauto experiments.
 """
 
@@ -14,7 +14,9 @@ import html
 import json
 import os
 import random
+import subprocess
 import sys
+import tempfile
 import time
 import zlib
 from dataclasses import dataclass
@@ -38,9 +40,16 @@ except ModuleNotFoundError:
     from modalauto.backend import experiment_config, team_journal
 
 
-DEFAULT_LAYOUT = experiment_config.layout("vizdoom-basic")
+EXPERIMENT_NAME = os.environ.get("VIZDOOM_EXPERIMENT_NAME", "vizdoom-basic")
+SCENARIO_FILE = os.environ.get("VIZDOOM_SCENARIO_FILE", "basic.cfg")
+SCENARIO_TITLE = os.environ.get("VIZDOOM_SCENARIO_TITLE", "Basic")
+DEFAULT_RUN_ID = os.environ.get("VIZDOOM_DEFAULT_RUN_ID", EXPERIMENT_NAME.replace("-", "_") + "_v1")
+
+DEFAULT_LAYOUT = experiment_config.layout(EXPERIMENT_NAME)
 JOURNAL_ROOT = DEFAULT_LAYOUT.journal_dir
 SCORE_SCALE = 1000
+GIF_FPS = 12
+GIF_FRAME_MS = round(1000 / GIF_FPS)
 
 
 @dataclass(frozen=True)
@@ -52,6 +61,8 @@ class Policy:
     fire_period: int = 1
     strafe_period: int = 0
     random_fire_prob: float = 0.0
+    aim_tolerance: float = 10.0
+    fire_tolerance: float = 40.0
 
 
 @dataclass
@@ -90,13 +101,89 @@ def import_vizdoom(vizdoom_root: Path) -> Any:
     return vzd
 
 
+def scenario_path(vizdoom_root: Path) -> Path:
+    return vizdoom_root.expanduser().resolve() / "scenarios" / SCENARIO_FILE
+
+
 def score_key(row: Row) -> float:
     if row.score is None:
         return float("-inf")
     return row.score
 
 
-def action_for(policy: Policy, step: int, rng: random.Random) -> list[int]:
+def label_tracking_action(policy: Policy, state: Any | None) -> list[int] | None:
+    if state is None or not getattr(state, "labels", None):
+        return None
+    monster = None
+    player = None
+    for label in state.labels:
+        if getattr(label, "object_name", "") == "Cacodemon":
+            monster = label
+        elif getattr(label, "object_name", "") == "DoomPlayer":
+            player = label
+    if monster is None or player is None:
+        return None
+    lateral_error = float(monster.object_position_y) - float(player.object_position_y)
+    return [
+        1 if lateral_error > policy.aim_tolerance else 0,
+        1 if lateral_error < -policy.aim_tolerance else 0,
+        1 if abs(lateral_error) <= policy.fire_tolerance else 0,
+    ]
+
+
+def screen_label_tracking_action(
+    policy: Policy,
+    state: Any | None,
+    control_state: dict[str, float] | None = None,
+) -> list[int] | None:
+    labels_buffer = getattr(state, "labels_buffer", None) if state is not None else None
+    if labels_buffer is None:
+        return None
+    ys, xs = (labels_buffer == 127).nonzero()
+    if len(xs) == 0:
+        return None
+    width = int(getattr(labels_buffer, "shape", (0, 0))[1])
+    if width <= 0:
+        return None
+    lateral_error = (width - 1) / 2 - float(xs.mean())
+    fire_tolerance = policy.fire_tolerance
+    if policy.kind == "screen_label_track_fire_adaptive":
+        if control_state is not None and "initial_lateral_error" not in control_state:
+            control_state["initial_lateral_error"] = lateral_error
+        initial_error = control_state.get("initial_lateral_error", lateral_error) if control_state is not None else lateral_error
+        initial_abs_error = abs(initial_error)
+        if initial_abs_error < 35.0:
+            fire_tolerance = 20.0
+        elif initial_error > 44.0:
+            fire_tolerance = 25.0
+        elif initial_error > 0.0:
+            fire_tolerance = 22.0
+        else:
+            fire_tolerance = 25.0
+    return [
+        1 if lateral_error > policy.aim_tolerance else 0,
+        1 if lateral_error < -policy.aim_tolerance else 0,
+        1 if abs(lateral_error) <= fire_tolerance else 0,
+    ]
+
+
+def action_for(
+    policy: Policy,
+    step: int,
+    rng: random.Random,
+    state: Any | None = None,
+    control_state: dict[str, float] | None = None,
+) -> list[int]:
+    if policy.kind in {"screen_label_track_fire", "screen_label_track_fire_adaptive"}:
+        action = screen_label_tracking_action(policy, state, control_state)
+        if action is not None:
+            return action
+        return [0, 0, 1 if step % policy.fire_period == 0 else 0]
+    if policy.kind == "label_track_fire":
+        action = label_tracking_action(policy, state)
+        if action is not None:
+            return action
+        return [0, 0, 1 if step % policy.fire_period == 0 else 0]
     # Available buttons in basic.cfg: MOVE_LEFT, MOVE_RIGHT, ATTACK.
     if policy.kind == "attack_only":
         return [0, 0, 1 if step % policy.fire_period == 0 else 0]
@@ -110,6 +197,12 @@ def action_for(policy: Policy, step: int, rng: random.Random) -> list[int]:
     if policy.kind == "random":
         return [rng.randrange(2), rng.randrange(2), 1 if rng.random() < policy.random_fire_prob else 0]
     return [0, 0, 0]
+
+
+def normalize_action(action: list[int], button_count: int) -> list[int]:
+    if len(action) >= button_count:
+        return action[:button_count]
+    return action + [0] * (button_count - len(action))
 
 
 def png_chunk(kind: bytes, payload: bytes) -> bytes:
@@ -154,33 +247,42 @@ def capture_policy_frames(
     vizdoom_root: Path,
     seed: int,
     frame_skip: int,
-    max_frames: int = 14,
 ) -> list[tuple[bytes, int, int]]:
     vzd = import_vizdoom(vizdoom_root)
-    scenario = vizdoom_root.expanduser().resolve() / "scenarios" / "basic.cfg"
+    scenario = scenario_path(vizdoom_root)
     game = vzd.DoomGame()
     game.load_config(str(scenario))
     game.set_window_visible(False)
     game.set_console_enabled(False)
     game.set_screen_format(vzd.ScreenFormat.RGB24)
+    game.set_labels_buffer_enabled(True)
     if hasattr(game, "set_seed"):
         game.set_seed(int(seed))
     game.init()
-    frames: list[tuple[bytes, int, int]] = []
+    button_count = int(game.get_available_buttons_size())
+    all_frames: list[tuple[bytes, int, int]] = []
     try:
         rng = random.Random(seed)
         game.new_episode()
         step = 0
-        capture_every = max(1, 300 // max_frames)
-        while not game.is_episode_finished() and len(frames) < max_frames:
+        control_state: dict[str, float] = {}
+        state = game.get_state()
+        if state is not None:
+            all_frames.append(screen_rgb_bytes(state.screen_buffer))
+        while not game.is_episode_finished():
             state = game.get_state()
-            if state is not None and step % capture_every == 0:
-                frames.append(screen_rgb_bytes(state.screen_buffer))
-            game.make_action(action_for(policy, step, rng), frame_skip)
+            action = normalize_action(action_for(policy, step, rng, state, control_state), button_count)
+            for _ in range(max(1, frame_skip)):
+                if game.is_episode_finished():
+                    break
+                game.make_action(action, 1)
+                state = game.get_state()
+                if state is not None:
+                    all_frames.append(screen_rgb_bytes(state.screen_buffer))
             step += 1
     finally:
         game.close()
-    return frames
+    return all_frames
 
 
 def write_policy_recording_svg(
@@ -211,10 +313,81 @@ def write_policy_recording_svg(
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}" role="img" aria-label="ViZDoom recording for {html.escape(policy.name)}">
-  <title>{html.escape(policy.name)} ViZDoom Basic recording</title>
+  <title>{html.escape(policy.name)} ViZDoom {html.escape(SCENARIO_TITLE)} recording</title>
   {''.join(images)}
 </svg>
 """)
+
+
+def write_policy_recording_gif(
+    policy: Policy,
+    path: Path,
+    vizdoom_root: Path,
+    seed: int,
+    frame_skip: int,
+) -> None:
+    frames = capture_policy_frames(policy, vizdoom_root, seed, frame_skip)
+    if not frames:
+        raise ValueError("no ViZDoom frames captured")
+
+    width, height = frames[0][1], frames[0][2]
+    same_size_frames = [rgb for rgb, frame_width, frame_height in frames if frame_width == width and frame_height == height]
+    if not same_size_frames:
+        raise ValueError("no same-sized ViZDoom frames captured")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        from PIL import Image
+
+        images = [Image.frombytes("RGB", (width, height), rgb) for rgb in same_size_frames]
+        images[0].save(
+            path,
+            format="GIF",
+            save_all=True,
+            append_images=images[1:],
+            duration=GIF_FRAME_MS,
+            loop=0,
+            optimize=True,
+        )
+    except ModuleNotFoundError:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for i, rgb in enumerate(same_size_frames):
+                (tmp_path / f"frame_{i:04d}.png").write_bytes(png_bytes(rgb, width, height))
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-loglevel", "error", "-framerate", str(GIF_FPS),
+                    "-i", str(tmp_path / "frame_%04d.png"),
+                    "-loop", "0", str(path),
+                ],
+                check=True,
+            )
+
+
+def policy_gif_path(artifact_dir: Path, policy: Policy) -> Path:
+    return artifact_dir / "viz" / f"{policy.name}.gif"
+
+
+def require_policy_gif(path: Path) -> None:
+    if path.suffix != ".gif" or not path.exists() or path.stat().st_size <= 0:
+        raise ValueError(f"missing required submission GIF: {path}")
+    data = path.read_bytes()
+    if data[:6] not in {b"GIF87a", b"GIF89a"}:
+        raise ValueError(f"invalid required submission GIF: {path}")
+    if data.count(b"\x2c") < 2:
+        raise ValueError(f"required submission GIF is not animated: {path}")
+
+
+def media_config(seed: int, frame_skip: int) -> dict[str, int | str]:
+    return {
+        "type": "image/gif",
+        "fps": GIF_FPS,
+        "frame_ms": GIF_FRAME_MS,
+        "timeline": "full_episode",
+        "capture_stride_tics": 1,
+        "seed": seed,
+        "frame_skip": frame_skip,
+    }
 
 
 def evaluate_policy(
@@ -226,23 +399,28 @@ def evaluate_policy(
 ) -> Row:
     try:
         vzd = import_vizdoom(vizdoom_root)
-        scenario = vizdoom_root.expanduser().resolve() / "scenarios" / "basic.cfg"
+        scenario = scenario_path(vizdoom_root)
         rewards: list[float] = []
         for seed in seeds:
             game = vzd.DoomGame()
             game.load_config(str(scenario))
             game.set_window_visible(False)
             game.set_console_enabled(False)
+            game.set_labels_buffer_enabled(True)
             if hasattr(game, "set_seed"):
                 game.set_seed(int(seed))
             game.init()
+            button_count = int(game.get_available_buttons_size())
             try:
                 rng = random.Random(seed)
                 for _ in range(episodes):
                     game.new_episode()
                     step = 0
+                    control_state: dict[str, float] = {}
                     while not game.is_episode_finished():
-                        game.make_action(action_for(policy, step, rng), frame_skip)
+                        state = game.get_state()
+                        action = normalize_action(action_for(policy, step, rng, state, control_state), button_count)
+                        game.make_action(action, frame_skip)
                         step += 1
                     rewards.append(float(game.get_total_reward()))
             finally:
@@ -282,6 +460,38 @@ def candidate_batch(hypothesis_record: dict | None = None) -> list[Policy]:
         Policy("right_fire", "hand_designed", "Strafe right while firing.", "right_fire"),
         Policy("slow_sweep_fire", "hand_designed", "Alternate strafe direction every 12 steps while firing.", "sweep_fire", strafe_period=12),
         Policy("fast_sweep_fire", "hand_designed", "Alternate strafe direction every 4 steps while firing.", "sweep_fire", strafe_period=4),
+        Policy(
+            "label_track_fire_wide",
+            "observation_guided",
+            "Use ViZDoom object labels to strafe toward the Cacodemon and fire once aligned.",
+            "label_track_fire",
+            aim_tolerance=10.0,
+            fire_tolerance=40.0,
+        ),
+        Policy(
+            "screen_label_track_fire",
+            "observation_guided",
+            "Use the Cacodemon screen-space label mask to center it under the crosshair before firing.",
+            "screen_label_track_fire",
+            aim_tolerance=10.0,
+            fire_tolerance=20.0,
+        ),
+        Policy(
+            "screen_label_track_fire_adaptive",
+            "observation_guided",
+            "Use screen-space label aiming with a fire window adapted to the initial target offset.",
+            "screen_label_track_fire_adaptive",
+            aim_tolerance=10.0,
+            fire_tolerance=20.0,
+        ),
+        Policy(
+            "label_track_fire_tight",
+            "observation_guided",
+            "Use ViZDoom object labels with a tighter firing window to avoid wasted shots.",
+            "label_track_fire",
+            aim_tolerance=10.0,
+            fire_tolerance=25.0,
+        ),
         Policy("random_70pct_fire", "random", "Random movement with 70% attack probability.", "random", random_fire_prob=0.7),
     ]
     if hypothesis_record:
@@ -309,9 +519,11 @@ def write_run(
     artifact_dir = journal_root / "artifacts" / run_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
     approach_media = {}
+    media_seed = seeds[0] if seeds else 1
     for policy in policies:
-        media_path = artifact_dir / "viz" / f"{policy.name}.svg"
-        write_policy_recording_svg(policy, media_path, vizdoom_root, seeds[0] if seeds else 1, frame_skip)
+        media_path = policy_gif_path(artifact_dir, policy)
+        write_policy_recording_gif(policy, media_path, vizdoom_root, media_seed, frame_skip)
+        require_policy_gif(media_path)
         approach_media[policy.name] = str(media_path)
 
     csv_path = artifact_dir / "candidates.csv"
@@ -339,11 +551,11 @@ def write_run(
     summary = {
         "run_id": run_id,
         "created_at": now_iso(),
-        "domain": "vizdoom-basic",
+        "domain": EXPERIMENT_NAME,
         "direction": "maximize",
         "primary_metric": "mean_total_reward",
         "vizdoom_root": str(vizdoom_root.expanduser().resolve()),
-        "scenario": str(vizdoom_root.expanduser().resolve() / "scenarios" / "basic.cfg"),
+        "scenario": str(scenario_path(vizdoom_root)),
         "seeds": seeds,
         "episodes_per_seed": episodes,
         "frame_skip": frame_skip,
@@ -351,6 +563,7 @@ def write_run(
         "n_ok": sum(1 for row in rows if row.semantic == "ok"),
         "n_invalid": sum(1 for row in rows if row.semantic == "invalid"),
         "approach_media": approach_media,
+        "media_config": media_config(media_seed, frame_skip),
         "best": None if best_row is None else best_row.__dict__,
         "top_5": [row.__dict__ for row in sorted(
             [row for row in rows if row.semantic == "ok" and row.score is not None],
@@ -362,7 +575,7 @@ def write_run(
     runs_dir = journal_root / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
     (runs_dir / f"{run_id}.md").write_text(
-        f"# vizdoom-basic run {run_id}\n\n"
+        f"# {EXPERIMENT_NAME} run {run_id}\n\n"
         f"- Scenario: `{summary['scenario']}`\n"
         f"- Direction: maximize mean total reward\n"
         f"- Candidates: {summary['n_candidates']} ({summary['n_ok']} ok, {summary['n_invalid']} invalid)\n"
@@ -388,12 +601,12 @@ def write_journal(
     team_journal.init_db(db_path)
     db = team_journal.connect(db_path)
     stamp = team_journal.now()
-    team_id = "vizdoom-basic-loop-team"
-    agent_id = "vizdoom-basic-loop-agent"
+    team_id = f"{EXPERIMENT_NAME}-loop-team"
+    agent_id = f"{EXPERIMENT_NAME}-loop-agent"
     db.execute(
         "INSERT OR IGNORE INTO teams (id, status, focus, context_json, created_at, updated_at) "
         "VALUES (?, 'active', ?, '{}', ?, ?)",
-        (team_id, "ViZDoom Basic policy search", stamp, stamp),
+        (team_id, f"ViZDoom {SCENARIO_TITLE} policy search", stamp, stamp),
     )
     db.execute(
         "INSERT OR IGNORE INTO agents (id, role, team_id, status, created_at, updated_at) "
@@ -405,7 +618,7 @@ def write_journal(
         hyp_id = team_journal.next_id(db, "hyp", "hypotheses")
         context = {
             "run_id": run_id,
-            "domain": "vizdoom-basic",
+            "domain": EXPERIMENT_NAME,
             "direction": "maximize",
             "policy": policy.__dict__,
             "seeds": seeds,
@@ -423,7 +636,7 @@ def write_journal(
             """,
             (
                 hyp_id, team_id, agent_id, f"{policy.name} - {policy.family}",
-                policy.notes, "maximize mean total reward on ViZDoom basic.cfg",
+                policy.notes, f"maximize mean total reward on ViZDoom {SCENARIO_FILE}",
                 json.dumps(context), stamp, stamp,
             ),
         )
@@ -432,7 +645,8 @@ def write_journal(
         policy_path = artifact_dir / "policies" / f"{policy.name}.json"
         policy_path.parent.mkdir(parents=True, exist_ok=True)
         policy_path.write_text(json.dumps(policy.__dict__, indent=2))
-        approach_media = artifact_dir / "viz" / f"{policy.name}.svg"
+        approach_media = policy_gif_path(artifact_dir, policy)
+        require_policy_gif(approach_media)
         db.execute(
             """
             INSERT INTO submissions
@@ -447,6 +661,9 @@ def write_journal(
                     "family": policy.family,
                     "notes": policy.notes,
                     "approach_media": str(approach_media),
+                    "primary_media": str(approach_media),
+                    "media_type": "image/gif",
+                    "media_config": media_config(seeds[0] if seeds else 1, frame_skip),
                 }),
                 stamp, stamp,
             ),
@@ -466,6 +683,9 @@ def write_journal(
             "frame_skip": frame_skip,
             "stochastic": False,
             "approach_media": str(approach_media),
+            "primary_media": str(approach_media),
+            "media_type": "image/gif",
+            "media_config": media_config(seeds[0] if seeds else 1, frame_skip),
         }
         decision = "accept" if row.semantic == "ok" else "reject"
         db.execute(
@@ -486,7 +706,7 @@ def write_journal(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--run-id", default="vizdoom_basic_v1")
+    parser.add_argument("--run-id", default=DEFAULT_RUN_ID)
     parser.add_argument("--experiment-root", type=Path, default=None)
     parser.add_argument("--journal-root", type=Path, default=JOURNAL_ROOT)
     parser.add_argument("--hypothesis-json", type=Path, default=None)
