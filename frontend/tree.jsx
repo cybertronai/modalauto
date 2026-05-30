@@ -403,7 +403,7 @@
               <span className="dot" />{hover.st}</span></div>
           <div className="tt-title">{hover.n.title}</div>
           {nodeImage(hover.n)
-            ? <img className="tt-media" src={artifactUrl(nodeImage(hover.n).path)} alt={nodeImage(hover.n).name || 'approach'} />
+            ? <img className="tt-media" src={artifactUrl(nodeImage(hover.n).path, nodeImage(hover.n))} alt={nodeImage(hover.n).name || 'approach'} />
             : null}
           {hover.n.score != null && hover.st === 'verified'
             ? <div className="tt-score mono">{fmtScore(hover.n.score) + ' ' + (E.meta.metric || 'score')}</div>
@@ -438,14 +438,15 @@
     return 'idle';
   }
 
-  function artifactUrl(path) {
-    return '/api/artifact?path=' + encodeURIComponent(path);
+  function artifactUrl(path, file = null) {
+    const version = file && file.size != null ? '&v=' + encodeURIComponent(file.size) : '';
+    return '/api/artifact?path=' + encodeURIComponent(path) + version;
   }
 
   function nodeImage(node) {
     const details = node && node.artifact && node.artifact.details;
     const images = details && Array.isArray(details.images) ? details.images : [];
-    return images[0] || null;
+    return (details && details.primaryMedia) || images[0] || null;
   }
 
   window.EvoTree = EvoTree;

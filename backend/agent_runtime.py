@@ -27,7 +27,7 @@ from autoresearch.experiments.matmul.matmul import matmul
 from autoresearch.experiments.matmul.loop import buckets, verify_general
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = experiment_config.AUTORESEARCH_ROOT
 ROLE_ALIASES = {
     "creative-explorer": "creative_explorer",
     "topline-manager": "topline_manager",

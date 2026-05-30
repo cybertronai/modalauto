@@ -260,6 +260,25 @@ def artifact_details(journal: Path, artifact_path_value, summary: dict, raw_buck
             if p.exists() and p not in wanted:
                 wanted.append(p)
 
+    primary_media_value = None
+    if isinstance(summary, dict):
+        primary_media_value = summary.get("primary_media") or summary.get("approach_media")
+    if not primary_media_value and isinstance(raw_buckets, dict):
+        primary_media_value = raw_buckets.get("primary_media") or raw_buckets.get("approach_media")
+    primary_media_path = Path(primary_media_value) if primary_media_value else None
+    if primary_media_path and primary_media_path.exists() and primary_media_path not in wanted:
+        wanted.append(primary_media_path)
+
+    images = [file_item(p) for p in wanted if p.exists() and file_kind(p) == "image"]
+    videos = [file_item(p) for p in wanted if p.exists() and file_kind(p) == "video"]
+    primary_media = file_item(primary_media_path) if primary_media_path and primary_media_path.exists() else None
+    gif_media = next((item for item in images if item["name"].lower().endswith(".gif")), None)
+    media_config = None
+    if isinstance(summary, dict):
+        media_config = summary.get("media_config")
+    if media_config is None and isinstance(raw_buckets, dict):
+        media_config = raw_buckets.get("media_config")
+
     body = body_from_npy(path)
     metrics = {}
     if isinstance(summary, dict):
@@ -275,8 +294,11 @@ def artifact_details(journal: Path, artifact_path_value, summary: dict, raw_buck
         "name": path.name,
         "kind": "voxel_body" if body else file_kind(path),
         "files": [file_item(p) for p in wanted if p.exists()],
-        "images": [file_item(p) for p in wanted if p.exists() and file_kind(p) == "image"],
-        "videos": [file_item(p) for p in wanted if p.exists() and file_kind(p) == "video"],
+        "images": images,
+        "videos": videos,
+        "primaryMedia": primary_media or gif_media,
+        "gif": gif_media,
+        "mediaConfig": media_config,
         "body": body,
         "preview": text_preview(path),
         "metrics": metrics,
@@ -552,7 +574,8 @@ def build_payload(journal, db_filename=None):
         sub = sorted(subs, key=sub_key)[0] if subs else None
         ver = ver_by_sub.get(sub["id"]) if sub else None
         context = load_json(hyp["context_json"], {})
-        evolution = context.get("evolution") if isinstance(context.get("evolution"), dict) else {}
+        context_evolution = context.get("evolution") if isinstance(context, dict) else None
+        evolution = context_evolution if isinstance(context_evolution, dict) else {}
         summary = load_json(sub["candidate_summary_json"], {}) if sub else {}
         best = summary.get("best") if isinstance(summary, dict) else {}
         if not isinstance(best, dict):

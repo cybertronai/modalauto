@@ -17,5 +17,5 @@ Each run writes:
 - `candidates.csv`: policy scores and per-seed rewards.
 - `summary.json`: run metadata, top policies, and best score.
 - `best_policy.json`: winning policy spec.
-- `viz/<policy>.svg`: animated approach preview for each policy node.
+- `viz/<policy>.gif`: animated approach preview for each policy node.
 - `journal/runs/<run-id>.md`: human-readable summary.
