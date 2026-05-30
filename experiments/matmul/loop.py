@@ -550,7 +550,42 @@ def write_run(
     if best_row is None:
         best_row = next((row for row in rows if row["semantic"] == "ok" and row["score"] != ""), None)
     if best_row is None:
-        raise RuntimeError("no valid candidate found")
+        summary = {
+            "run_id": run_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "blind": not include_reference_mechanisms,
+            "uses_reference_mechanisms": include_reference_mechanisms,
+            "strategy": strategy,
+            "target": target,
+            "target_status": "no_valid_candidate",
+            "best": None,
+            "avoided_candidates": sorted(avoid_candidates),
+            "candidate_count": len(rows),
+            "families": sorted({str(row["family"]) for row in rows}),
+            "next_handoff": {
+                "reason": "all generated candidates were duplicate, invalid, or unchecked",
+                "next_role": "global_searcher",
+            },
+        }
+        (artifact_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+        note = run_dir / f"{run_id}.md"
+        note.write_text(
+            "\n".join(
+                [
+                    f"# {run_id}",
+                    "",
+                    "Simplified single-process matmul loop.",
+                    "",
+                    "## Result",
+                    "",
+                    "- No valid non-duplicate candidate found.",
+                    f"- Candidate CSV: `{artifact_dir / 'candidate_scores.csv'}`",
+                    f"- Target status: `{summary['target_status']}`",
+                    "",
+                ]
+            )
+        )
+        return artifact_dir
 
     by_name = {cand.name: cand for cand in candidates}
     best = by_name[str(best_row["name"])]
@@ -670,11 +705,14 @@ def main(argv: list[str] | None = None) -> int:
         args.journal_root.expanduser().resolve(),
         avoid_candidates,
     )
-    best = next(row for row in rows if row["semantic"] == "ok" and row["score"] != "")
+    summary_path = artifact_dir / "summary.json"
+    summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
+    best = summary.get("best")
     print(json.dumps({
         "artifact_dir": str(artifact_dir),
         "best": best,
         "elapsed_seconds": round(time.perf_counter() - start, 3),
+        "status": summary.get("target_status"),
     }, indent=2, sort_keys=True))
     return 0
 
