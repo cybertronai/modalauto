@@ -269,10 +269,14 @@
         ? [{ type: 'matmul_ir', label: 'Candidate IR & verification' }, { type: 'matmul_playback', label: 'Run playback' }]
         : [{ type: 'artifact_bundle', label: 'Artifacts' }];
     const visualizationSections = views.map((view) => renderVisualization(view, node, speed)).filter(Boolean);
+    const apiPath = (path) => {
+      const task = window.__AUTORESEARCH_JOURNAL || '';
+      return path + (task ? (path.includes('?') ? '&' : '?') + 'journal=' + encodeURIComponent(task) : '');
+    };
     const postControl = async (path, payload) => {
       setControlStatus('sending...');
       try {
-        const res = await fetch(path, {
+        const res = await fetch(apiPath(path), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
@@ -281,7 +285,7 @@
         if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status));
         setControlStatus(data.hypothesisId ? 'queued ' + data.hypothesisId : 'updated');
         if (window.__AUTORESEARCH_APPLY_PAYLOAD) {
-          const latest = await fetch('/api/data?ts=' + Date.now(), { cache: 'no-store' }).then((r) => r.json());
+          const latest = await fetch(apiPath('/api/data?ts=' + Date.now()), { cache: 'no-store' }).then((r) => r.json());
           if (latest && latest.payload) window.__AUTORESEARCH_APPLY_PAYLOAD(latest.payload);
         }
       } catch (err) {

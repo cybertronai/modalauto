@@ -8,7 +8,7 @@ import sqlite3
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from export_real_data import build_payload, detect_db, render_js, render_runs_js, node_trace
 
@@ -32,6 +32,21 @@ def pick_journal():
     if not candidates:
         return None
     return max(candidates, key=journal_mtime_ns)
+
+
+def journal_id(journal):
+    return journal.parent.name if journal.name == "journal" else journal.name
+
+
+def journal_from_request(handler):
+    q = parse_qs(urlparse(handler.path).query)
+    selected = (q.get("journal") or q.get("task") or [None])[0]
+    if selected:
+        for journal in discover_journals():
+            if journal_id(journal) == selected or journal.name == selected or journal.parent.name == selected:
+                return journal
+        return None
+    return pick_journal()
 
 
 def journal_mtime_ns(journal):
@@ -78,8 +93,28 @@ def build_runs(journals):
         desc = f"{meta.get('totalNodes', 0)} hypotheses"
         if best is not None:
             desc += f" · best {best:,}"
-        runs.append({"id": journal.name, "label": run_label(journal), "desc": desc, "payload": payload})
+        runs.append({"id": journal_id(journal), "label": run_label(journal), "desc": desc, "payload": payload})
     return runs
+
+
+def build_tasks(journals, selected=None):
+    tasks = []
+    for journal in journals:
+        payload = build_payload(journal)
+        meta = payload.get("meta", {})
+        best = meta.get("best")
+        desc = f"{meta.get('totalNodes', 0)} hypotheses"
+        if best is not None:
+            desc += f" · best {best:,}"
+        jid = journal_id(journal)
+        tasks.append({
+            "id": jid,
+            "label": run_label(journal),
+            "desc": desc,
+            "journal": str(journal),
+            "selected": bool(selected and journal.resolve() == selected.resolve()),
+        })
+    return tasks
 
 
 def db_signature(journal):
@@ -345,7 +380,7 @@ class AutoresearchHandler(SimpleHTTPRequestHandler):
             last_heartbeat = 0.0
             try:
                 while True:
-                    journal = pick_journal()
+                    journal = journal_from_request(self)
                     now = time.time()
                     if journal and detect_db(journal).exists():
                         db_hash, counts = db_signature(journal)
@@ -375,7 +410,7 @@ class AutoresearchHandler(SimpleHTTPRequestHandler):
                 return
 
         if path == "/real-data.js":
-            journal = pick_journal()
+            journal = journal_from_request(self)
             self.end_no_cache_headers("text/javascript; charset=utf-8")
             if not journal:
                 self.wfile.write(b"console.warn('Autoresearch: no team_journal.db found; using mock data');\n")
@@ -401,8 +436,17 @@ class AutoresearchHandler(SimpleHTTPRequestHandler):
                 self.wfile.write(f"console.error({msg});\n".encode("utf-8"))
             return
 
+        if path == "/api/tasks":
+            journal = journal_from_request(self)
+            self.end_no_cache_headers("application/json; charset=utf-8")
+            self.wfile.write(json.dumps({
+                "selected": journal_id(journal) if journal else None,
+                "tasks": build_tasks(discover_journals(), journal),
+            }, separators=(",", ":")).encode("utf-8"))
+            return
+
         if path == "/api/meta":
-            journal = pick_journal()
+            journal = journal_from_request(self)
             payload = {"journal": str(journal) if journal else None, "hash": None, "counts": {}}
             if journal:
                 _, payload["hash"], payload["counts"] = append_changelog_if_changed(journal)
@@ -412,7 +456,7 @@ class AutoresearchHandler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/data":
-            journal = pick_journal()
+            journal = journal_from_request(self)
             self.end_no_cache_headers("application/json; charset=utf-8")
             if not journal:
                 self.wfile.write(json.dumps({"journal": None, "payload": None}).encode("utf-8"))
@@ -431,7 +475,7 @@ class AutoresearchHandler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/changelog":
-            journal = pick_journal()
+            journal = journal_from_request(self)
             payload = {"journal": str(journal) if journal else None, "frames": []}
             if journal:
                 append_changelog_if_changed(journal)
@@ -453,7 +497,7 @@ class AutoresearchHandler(SimpleHTTPRequestHandler):
             if jsel:
                 journal = next((j for j in discover_journals() if j.name == jsel
                                 or j.parent.name == jsel), None)
-            journal = journal or pick_journal()
+            journal = journal or journal_from_request(self)
             self.end_no_cache_headers("application/json; charset=utf-8")
             if not journal or not node_id:
                 self.wfile.write(json.dumps({"ok": False, "error": "missing journal or node"}).encode("utf-8"))
@@ -494,7 +538,7 @@ class AutoresearchHandler(SimpleHTTPRequestHandler):
         if not path.startswith("/api/control/"):
             self.send_error(404)
             return
-        journal = pick_journal()
+        journal = journal_from_request(self)
         if not journal:
             self.send_json(404, {"ok": False, "error": "no journal DB found"})
             return

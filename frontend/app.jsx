@@ -29,6 +29,14 @@
   };
   const mmss = (t) => String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(Math.round(t % 60)).padStart(2, '0');
   const directionLabel = () => String((E && E.meta && E.meta.direction) || 'minimize').toLowerCase() === 'maximize' ? 'maximize' : 'minimize';
+  const initialTask = () => new URLSearchParams(window.location.search).get('journal') || localStorage.getItem('autoresearch-task') || '';
+  const apiUrl = (path, task, params) => {
+    const base = (window.FRONTEND_API_URL || '').replace(/\/$/, '');
+    const url = new URL(base + path, window.location.origin);
+    if (task) url.searchParams.set('journal', task);
+    Object.entries(params || {}).forEach(([k, v]) => url.searchParams.set(k, v));
+    return base ? url.toString() : url.pathname + url.search;
+  };
 
   function Logo() {
     return (
@@ -65,13 +73,13 @@
     );
   }
 
-  function ChangelogBadge() {
+  function ChangelogBadge({ task }) {
     const [info, setInfo] = useState(null);
     useEffect(() => {
       let stopped = false;
       async function load() {
         try {
-          const res = await fetch('/api/changelog?ts=' + Date.now(), { cache: 'no-store' });
+          const res = await fetch(apiUrl('/api/changelog', task, { ts: Date.now() }), { cache: 'no-store' });
           if (!res.ok) return;
           const next = await res.json();
           if (!stopped) setInfo(next);
@@ -80,7 +88,7 @@
       load();
       const id = setInterval(load, 3000);
       return () => { stopped = true; clearInterval(id); };
-    }, [E.series, E.meta.baseline, E.meta.best, E.meta.tMax]);
+    }, [task, E.series, E.meta.baseline, E.meta.best, E.meta.tMax]);
     if (!info || !info.frames) return null;
     const last = info.frames[info.frames.length - 1];
     const counts = last && last.counts ? last.counts : {};
@@ -89,6 +97,18 @@
         <span className="live-tag">● LIVE DB</span>
         <span className="mono">{(counts.hypotheses || E.meta.totalNodes) + ' hyp'}</span>
       </div>
+    );
+  }
+
+  function TaskSelect({ tasks, value, onChange }) {
+    if (!tasks.length) return null;
+    return (
+      <label className="task-select" title="Select autoresearch task">
+        <span>Task</span>
+        <select value={value || ''} onChange={(e) => onChange(e.target.value)}>
+          {tasks.map((task) => <option key={task.id} value={task.id}>{task.label}</option>)}
+        </select>
+      </label>
     );
   }
 
@@ -196,11 +216,58 @@
     const [speed, setSpeed] = useState(t.speed || 1);
     const [selected, setSelected] = useState(null);
     const [branchSelection, setBranchSelection] = useState([]);
+    const [currentTask, setCurrentTask] = useState(initialTask());
+    const [tasks, setTasks] = useState([]);
 
     useEffect(() => {
       worldRef.current = world;
       E = world;
     }, [world]);
+
+    useEffect(() => {
+      window.__AUTORESEARCH_JOURNAL = currentTask;
+      if (currentTask) localStorage.setItem('autoresearch-task', currentTask);
+      const url = new URL(window.location.href);
+      if (currentTask) url.searchParams.set('journal', currentTask);
+      else url.searchParams.delete('journal');
+      window.history.replaceState(null, '', url.pathname + url.search + url.hash);
+    }, [currentTask]);
+
+    useEffect(() => {
+      let stopped = false;
+      async function loadTasks() {
+        try {
+          const res = await fetch(apiUrl('/api/tasks', currentTask, { ts: Date.now() }), { cache: 'no-store' });
+          if (!res.ok) return;
+          const data = await res.json();
+          if (stopped) return;
+          const nextTasks = Array.isArray(data.tasks) ? data.tasks : [];
+          setTasks(nextTasks);
+          if (!currentTask && (data.selected || nextTasks[0])) setCurrentTask(data.selected || nextTasks[0].id);
+          else if (currentTask && nextTasks.length && !nextTasks.some((task) => task.id === currentTask)) setCurrentTask(nextTasks[0].id);
+        } catch (_) {}
+      }
+      loadTasks();
+      const id = setInterval(loadTasks, 5000);
+      return () => { stopped = true; clearInterval(id); };
+    }, [currentTask]);
+
+    const loadTaskData = useCallback(async (task) => {
+      const res = await fetch(apiUrl('/api/data', task, { ts: Date.now() }), { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data && data.payload && window.__AUTORESEARCH_APPLY_PAYLOAD) {
+        window.__AUTORESEARCH_APPLY_PAYLOAD(data.payload);
+      }
+    }, []);
+
+    const chooseTask = useCallback((task) => {
+      setCurrentTask(task);
+      setSelected(null);
+      setBranchSelection([]);
+      setPlaying(false);
+      loadTaskData(task);
+    }, [loadTaskData]);
 
     useEffect(() => {
       window.__AUTORESEARCH_APPLY_PAYLOAD = (payload) => {
@@ -229,7 +296,7 @@
         if (inFlight) return;
         inFlight = true;
         try {
-          const res = await fetch('/api/data?ts=' + Date.now(), { cache: 'no-store' });
+          const res = await fetch(apiUrl('/api/data', currentTask, { ts: Date.now() }), { cache: 'no-store' });
           if (!res.ok) return;
           const data = await res.json();
           if (!stopped && data && data.payload) {
@@ -240,14 +307,14 @@
           inFlight = false;
         }
       }
-      const events = new EventSource('/api/events');
+      const events = new EventSource(apiUrl('/api/events', currentTask));
       events.addEventListener('change', loadLatest);
       events.onerror = () => {};
       return () => {
         stopped = true;
         events.close();
       };
-    }, []);
+    }, [currentTask]);
 
     // theme + accent
     useEffect(() => { if (t.theme === 'dark') document.documentElement.dataset.theme = 'dark'; else document.documentElement.removeAttribute('data-theme'); }, [t.theme]);
@@ -283,11 +350,12 @@
               <a className="nav-tab active" href="index.html">Tree</a>
               <a className="nav-tab" href="compare.html">Compare</a>
             </nav>
+            <TaskSelect tasks={tasks} value={currentTask} onChange={chooseTask} />
             <div className="prob">
               <span className="prob-name">{E.meta.problem}</span>
               <span className="prob-sub mono">{directionLabel() + ' ' + E.meta.metric + ' · baseline ' + fmt(E.meta.baseline)}</span>
             </div>
-            <ChangelogBadge />
+            <ChangelogBadge task={currentTask} />
           </div>
           <StatTiles T={T} />
         </header>
@@ -353,8 +421,8 @@
   async function loadLiveData() {
     try {
       const base = window.FRONTEND_API_URL || '';
-      const endpoint = base ? base.replace(/\/$/, '') + '/api/data' : '/api/data';
-      const res = await fetch(endpoint + '?ts=' + Date.now(), { cache: 'no-store' });
+      const task = initialTask();
+      const res = await fetch(apiUrl('/api/data', task, { ts: Date.now() }), { cache: 'no-store' });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       if (data && data.payload && window.appWorld) {
