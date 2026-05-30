@@ -39,6 +39,14 @@ python bin/autoresearch-agent topline_manager --experiment matmul --agent-id man
 python bin/autoresearch-team --experiment matmul status
 ```
 
+Clear generated state for a fresh run. The command is a dry run unless `--yes`
+is passed:
+
+```bash
+python bin/autoresearch-clear-runs --experiment matmul
+python bin/autoresearch-clear-runs --experiment matmul --yes
+```
+
 This is the main autoresearch loop. The topline manager reads `experiments/matmul/workflow.json`, applies the scale plan, and spawns the rest of the team. All generated state stays inside the experiment folder:
 
 - `experiments/matmul/journal/`: team DB, research memory, messages, run artifacts, and frontend changelog.
