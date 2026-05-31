@@ -211,7 +211,17 @@
     return null;
   }
 
-  function InspectorPanel({ nodeId, T, speed, onClose, onSelect, branchSelection = [] }) {
+  function InspectorPanel({
+    nodeId,
+    T,
+    speed,
+    onClose,
+    onSelect,
+    onTrace,
+    branchSelection = [],
+    hoverPreviewIds = [],
+    onToggleHoverPreview,
+  }) {
     const node = E.nodes.find((n) => n.id === nodeId);
     const [controlText, setControlText] = useState('');
     const [injectMode, setInjectMode] = useState('branch');
@@ -251,6 +261,8 @@
       ? configuredViews
       : [{ type: 'artifact_bundle', label: 'Artifacts' }];
     const visualizationSections = views.map((view) => renderVisualization(view, node, speed)).filter(Boolean);
+    const nodeTraceIds = Array.isArray(node.traceIds) ? node.traceIds : [];
+    const hoverPreviewEnabled = hoverPreviewIds.includes(node.id);
     const postControl = async (path, payload) => {
       setControlStatus('sending...');
       try {
@@ -284,6 +296,20 @@
           {statusPill(stNow)}
         </div>
 
+        {onToggleHoverPreview ? <div className="insp-toolbar">
+          <button
+            className={'btn preview-toggle' + (hoverPreviewEnabled ? ' primary' : '')}
+            onClick={() => onToggleHoverPreview(node.id)}
+            title={hoverPreviewEnabled ? 'Disable hover preview for this run' : 'Enable hover preview for this run'}
+          >
+            <span aria-hidden="true">{hoverPreviewEnabled ? '◉' : '◎'}</span>
+            {hoverPreviewEnabled ? 'Hover view on' : 'Hover view'}
+          </button>
+          <span className="insp-meta mono">
+            {hoverPreviewIds.length ? hoverPreviewIds.length + ' marked' : 'mark this run for graph hover previews'}
+          </span>
+        </div> : null}
+
         <div className="sb-scroll">
           {/* identity */}
           <div className="sb-section">
@@ -296,6 +322,9 @@
               </span>
               <span className="insp-meta mono">{node.proposer}</span>
             </div>
+            {hoverPreviewIds.length
+              ? <div className="insp-actions"><span className="insp-meta mono">{hoverPreviewIds.length + ' hover views marked'}</span></div>
+              : null}
           </div>
 
           {/* result */}
@@ -412,6 +441,21 @@
 
           {timelapse ? <Section title="Timelapse" defaultOpen={true}>
             <TimelapsePreview media={timelapse} />
+          </Section> : null}
+
+          {nodeTraceIds.length && onTrace ? <Section title="Agent traces" aside={nodeTraceIds.length} defaultOpen={true}>
+            <div className="trace-link-list">
+              {nodeTraceIds.map((traceId) => {
+                const tr = E.traceById && E.traceById[traceId];
+                return (
+                  <button key={traceId} className="trace-link-row" onClick={() => onTrace(traceId)}>
+                    <span className={'trace-status ' + ((tr && tr.status) || 'ok')}>{(tr && tr.status) || 'trace'}</span>
+                    <span className="trace-link-title">{tr ? tr.title : traceId}</span>
+                    <span className="trace-link-meta">{tr && tr.durationMs != null ? Math.round(tr.durationMs / 1000) + 's' : traceId}</span>
+                  </button>
+                );
+              })}
+            </div>
           </Section> : null}
 
           {visualizationSections}

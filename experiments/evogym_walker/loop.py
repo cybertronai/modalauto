@@ -27,7 +27,7 @@ import numpy as np
 # Make `autoresearch` importable when this module is run as a script
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from autoresearch.backend import experiment_config, team_journal
+from autoresearch.backend import experiment_config, team_journal, workshop_tracing
 from autoresearch.experiments.evogym_walker.walker import scorer as evo_scorer
 from autoresearch.experiments.evogym_walker.walker import candidates as evo_candidates
 from autoresearch.experiments.evogym_walker.walker.candidates import Candidate
@@ -423,34 +423,69 @@ def main(argv: list[str] | None = None) -> int:
     seeds = [int(s) for s in args.seeds.split(",")]
     rng = np.random.default_rng(args.seed)
 
-    start = time.perf_counter()
-    cands = evo_candidates.baseline_batch(seed=args.seed)
-    # Add mutations of the canonical snake (first candidate)
-    cands.extend(evo_candidates.mutate_batch(cands[0], args.n_mutations, rng, strength=0.1))
-    print(f"[batch] {len(cands)} candidates", file=sys.stderr)
-
-    rows = score_candidates(cands, seeds, args.rollout_steps)
-    artifact_dir = write_run(args.run_id, rows, cands,
-                              args.journal_root.expanduser().resolve(),
-                              seeds, args.rollout_steps,
-                              render_rollouts=not args.no_rollout_artifacts)
-    if not args.no_journal:
-        write_journal(args.run_id, rows, cands,
-                      args.journal_root.expanduser().resolve(),
-                      artifact_dir, seeds, args.rollout_steps,
-                      hypothesis_record=hypothesis_record)
-
-    valid = sorted([r for r in rows if r.semantic == "ok"], key=lambda r: -r.score)
-    out = {
-        "artifact_dir": str(artifact_dir),
-        "best": None if not valid else {
-            "name": valid[0].name,
-            "score": valid[0].score,
-            "score_std": valid[0].score_std,
-            "family": valid[0].family,
+    journal_root = args.journal_root.expanduser().resolve()
+    hyp_id = None
+    if isinstance(hypothesis_record, dict):
+        hyp_id = hypothesis_record.get("hypothesis_id") or hypothesis_record.get("id")
+    with workshop_tracing.trace_run(
+        db_path=journal_root / "team_journal.db",
+        agent_id="evogym-loop-agent",
+        role="implementor",
+        kind="evogym_loop",
+        title=f"evogym run {args.run_id}",
+        item_id=str(hyp_id) if hyp_id else None,
+        run_id=args.run_id,
+        metadata={
+            "seeds": seeds,
+            "rollout_steps": args.rollout_steps,
+            "n_mutations": args.n_mutations,
+            "seed": args.seed,
+            "no_journal": args.no_journal,
+            "render_rollouts": not args.no_rollout_artifacts,
         },
-        "elapsed_seconds": round(time.perf_counter() - start, 3),
-    }
+    ):
+        start = time.perf_counter()
+        with workshop_tracing.span("generate_candidates", kind="tool", metadata={"seed": args.seed, "n_mutations": args.n_mutations}) as sp:
+            cands = evo_candidates.baseline_batch(seed=args.seed)
+            # Add mutations of the canonical snake (first candidate)
+            cands.extend(evo_candidates.mutate_batch(cands[0], args.n_mutations, rng, strength=0.1))
+            sp.set_output({"count": len(cands), "families": sorted({c.family for c in cands})})
+        print(f"[batch] {len(cands)} candidates", file=sys.stderr)
+
+        with workshop_tracing.span("score_candidates", kind="tool", metadata={"count": len(cands), "seeds": seeds, "rollout_steps": args.rollout_steps}) as sp:
+            rows = score_candidates(cands, seeds, args.rollout_steps)
+            valid_scores = [r.score for r in rows if r.semantic == "ok" and r.score is not None]
+            sp.set_output({
+                "ok": sum(1 for r in rows if r.semantic == "ok"),
+                "invalid": sum(1 for r in rows if r.semantic != "ok"),
+                "best": max(valid_scores) if valid_scores else None,
+            })
+        with workshop_tracing.span("write_run_artifacts", kind="tool", metadata={"journal_root": str(journal_root)}) as sp:
+            artifact_dir = write_run(args.run_id, rows, cands,
+                                     journal_root,
+                                     seeds, args.rollout_steps,
+                                     render_rollouts=not args.no_rollout_artifacts)
+            sp.set_output({"artifact_dir": str(artifact_dir)})
+        if not args.no_journal:
+            with workshop_tracing.span("write_journal_rows", kind="tool", metadata={"run_id": args.run_id, "candidates": len(cands)}) as sp:
+                write_journal(args.run_id, rows, cands,
+                              journal_root,
+                              artifact_dir, seeds, args.rollout_steps,
+                              hypothesis_record=hypothesis_record)
+                sp.set_output({"rows": len(rows)})
+
+        valid = sorted([r for r in rows if r.semantic == "ok"], key=lambda r: -r.score)
+        out = {
+            "artifact_dir": str(artifact_dir),
+            "best": None if not valid else {
+                "name": valid[0].name,
+                "score": valid[0].score,
+                "score_std": valid[0].score_std,
+                "family": valid[0].family,
+            },
+            "elapsed_seconds": round(time.perf_counter() - start, 3),
+        }
+        workshop_tracing.record_event("evogym_run_complete", kind="result", metadata=out)
     print(json.dumps(out, indent=2))
     return 0
 

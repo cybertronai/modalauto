@@ -18,7 +18,7 @@ REPO_ROOT = AUTORESEARCH_ROOT
 DEFAULT_AUTORESEARCH = AUTORESEARCH_ROOT
 START_CWD = Path.cwd().resolve()
 CHANGELOG_NAME = "frontend_changelog.jsonl"
-WATCH_TABLES = ["agents", "hypotheses", "submissions", "verifications", "manager_events"]
+WATCH_TABLES = ["agents", "hypotheses", "submissions", "verifications", "manager_events", "agent_traces"]
 CONTROL_TABLES = ["branch_controls", "control_actions"]
 
 
@@ -115,6 +115,7 @@ def db_signature(journal):
 
 def ensure_frontend_hooks(con):
     ensure_control_tables(con)
+    ensure_trace_tables(con)
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS frontend_state (
@@ -177,6 +178,36 @@ def ensure_control_tables(con):
     con.execute("CREATE INDEX IF NOT EXISTS idx_control_actions_created ON control_actions(created_at)")
 
 
+def ensure_trace_tables(con):
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_traces (
+            id              TEXT PRIMARY KEY,
+            agent_id        TEXT,
+            role            TEXT,
+            kind            TEXT NOT NULL,
+            item_id         TEXT,
+            run_id          TEXT,
+            title           TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'running'
+                            CHECK (status IN ('running', 'ok', 'failed')),
+            started_at      TEXT NOT NULL,
+            ended_at        TEXT,
+            duration_ms     INTEGER,
+            workshop_url    TEXT,
+            metadata_json   TEXT NOT NULL DEFAULT '{}',
+            spans_json      TEXT NOT NULL DEFAULT '[]',
+            error           TEXT,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
+        )
+        """
+    )
+    con.execute("CREATE INDEX IF NOT EXISTS idx_agent_traces_agent ON agent_traces(agent_id, started_at)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_agent_traces_item ON agent_traces(item_id, started_at)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_agent_traces_run ON agent_traces(run_id, started_at)")
+
+
 def changelog_path(journal):
     return journal / CHANGELOG_NAME
 
@@ -209,7 +240,7 @@ def append_changelog_if_changed(journal):
             "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "hash": db_hash,
             "counts": counts,
-            "payload": payload,
+            "meta": payload.get("meta", {}),
         }
         with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, separators=(",", ":")) + "\n")
@@ -237,7 +268,7 @@ def read_changelog(journal):
                 "captured_at": frame.get("captured_at"),
                 "hash": frame.get("hash"),
                 "counts": counts,
-                "meta": (frame.get("payload") or {}).get("meta", {}),
+                "meta": frame.get("meta") or (frame.get("payload") or {}).get("meta", {}),
             })
     return frames
 

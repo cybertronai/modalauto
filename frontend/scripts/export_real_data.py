@@ -71,6 +71,13 @@ def load_json(value, default):
         return default
 
 
+def table_exists(con, name):
+    return con.execute(
+        "select name from sqlite_master where type = 'table' and name = ?",
+        (name,),
+    ).fetchone() is not None
+
+
 def fit_bin(score, best):
     if score is None:
         return None
@@ -169,6 +176,39 @@ def detect_db(journal, db_filename=None):
     return journal / "team_journal.db"
 
 
+def load_traces(con, start):
+    if not table_exists(con, "agent_traces"):
+        return []
+    traces = []
+    for row in con.execute("select * from agent_traces order by started_at, id"):
+        metadata = load_json(row["metadata_json"], {})
+        spans = load_json(row["spans_json"], [])
+        if not isinstance(metadata, dict):
+            metadata = {}
+        if not isinstance(spans, list):
+            spans = []
+        traces.append({
+            "id": row["id"],
+            "agentId": row["agent_id"],
+            "role": row["role"],
+            "kind": row["kind"],
+            "itemId": row["item_id"],
+            "runId": row["run_id"],
+            "title": row["title"],
+            "status": row["status"],
+            "startedAt": seconds(row["started_at"], start),
+            "endedAt": seconds(row["ended_at"], start) if row["ended_at"] else None,
+            "startedAtIso": row["started_at"],
+            "endedAtIso": row["ended_at"],
+            "durationMs": row["duration_ms"],
+            "workshopUrl": row["workshop_url"],
+            "metadata": metadata,
+            "spans": spans,
+            "error": row["error"],
+        })
+    return traces
+
+
 def _resolve_artifact(journal, artifact_path):
     """Resolve a submission's stored artifact_path to a real file on disk,
     tolerating absolute paths from another checkout / relative paths."""
@@ -244,7 +284,11 @@ def artifact_details(journal: Path, artifact_path_value, summary: dict, raw_buck
         return None
     artifact_root = path.parent.parent if path.parent.name == "bodies" else path.parent
     wanted = [path]
-    for name in ["summary.json", "candidates.csv", "best.txt", "best.npy"]:
+    for name in [
+        "summary.json", "summary.raw.json", "candidates.csv", "best.txt",
+        "best.npy", "best.json", "policy.zip", "rollout.mp4", "rollout.webm",
+        "rollout.gif",
+    ]:
         p = artifact_root / name
         if p.exists() and p not in wanted:
             wanted.append(p)
@@ -462,7 +506,9 @@ def build_payload(journal, db_filename=None):
     exp_meta = experiment_meta(journal)
 
     all_times = []
-    for table in ["agents", "hypotheses", "submissions", "verifications", "manager_events"]:
+    for table in ["agents", "hypotheses", "submissions", "verifications", "manager_events", "agent_traces"]:
+        if not table_exists(con, table):
+            continue
         for row in con.execute(f"select created_at from {table}"):
             all_times.append(parse_ts(row["created_at"]))
     if not all_times:
@@ -491,9 +537,21 @@ def build_payload(journal, db_filename=None):
             "hypotheses": [],
             "agents": [],
             "events": [],
+            "traces": [],
             "series": [{"t": 0, "best": None}, {"t": 1, "best": None}],
         }
     start = min(all_times)
+    traces = load_traces(con, start)
+    traces_by_agent = {}
+    traces_by_item = {}
+    traces_by_run = {}
+    for trace in traces:
+        if trace.get("agentId"):
+            traces_by_agent.setdefault(trace["agentId"], []).append(trace)
+        if trace.get("itemId"):
+            traces_by_item.setdefault(trace["itemId"], []).append(trace)
+        if trace.get("runId"):
+            traces_by_run.setdefault(trace["runId"], []).append(trace)
 
     agents = []
     for row in con.execute("select * from agents order by created_at, id"):
@@ -506,12 +564,17 @@ def build_payload(journal, db_filename=None):
             "status": row["status"],
             "currentItem": row["current_item"],
         })
+    for agent in agents:
+        agent_traces = traces_by_agent.get(agent["id"], [])
+        agent["traceIds"] = [trace["id"] for trace in agent_traces]
+        agent["lastTraceId"] = agent["traceIds"][-1] if agent["traceIds"] else None
+        agent["traceCount"] = len(agent["traceIds"])
 
     hyp_rows = {r["id"]: dict(r) for r in con.execute("select * from hypotheses")}
     halted_branches = {
         r["branch_id"]: dict(r)
         for r in con.execute("select * from branch_controls where status = 'halted'")
-    } if con.execute("select name from sqlite_master where type = 'table' and name = 'branch_controls'").fetchone() else {}
+    } if table_exists(con, "branch_controls") else {}
     sub_rows = [dict(r) for r in con.execute("select * from submissions order by created_at, id")]
     ver_by_sub = {r["submission_id"]: dict(r) for r in con.execute("select * from verifications")}
     subs_by_hyp = {}
@@ -554,6 +617,23 @@ def build_payload(journal, db_filename=None):
         context = load_json(hyp["context_json"], {})
         evolution = context.get("evolution") if isinstance(context.get("evolution"), dict) else {}
         summary = load_json(sub["candidate_summary_json"], {}) if sub else {}
+        context_run_id = None
+        if isinstance(context, dict):
+            context_run_id = context.get("run_id")
+        if not context_run_id and isinstance(summary, dict):
+            context_run_id = summary.get("run_id")
+        node_trace_ids = []
+        for trace in traces_by_item.get(hyp_id, []):
+            node_trace_ids.append(trace["id"])
+        if context_run_id:
+            for trace in traces_by_run.get(str(context_run_id), []):
+                if trace["id"] not in node_trace_ids:
+                    node_trace_ids.append(trace["id"])
+        if sub:
+            for key in (sub.get("id"),):
+                for trace in traces_by_run.get(str(key), []):
+                    if trace["id"] not in node_trace_ids:
+                        node_trace_ids.append(trace["id"])
         best = summary.get("best") if isinstance(summary, dict) else {}
         if not isinstance(best, dict):
             best = {}
@@ -599,6 +679,7 @@ def build_payload(journal, db_filename=None):
             "rationale": hyp["rationale"],
             "expectedMovement": hyp["expected_movement"],
             "media": media,
+            "traceIds": node_trace_ids,
         })
         if ver is None:
             excluded_tree_items += 1
@@ -654,6 +735,8 @@ def build_payload(journal, db_filename=None):
             "halted": hyp_id in halted_branches,
             "evolution": evolution,
             "media": media,
+            "traceIds": node_trace_ids,
+            "lastTraceId": node_trace_ids[-1] if node_trace_ids else None,
         })
 
     normalize_display_parents(nodes)
@@ -711,6 +794,19 @@ def build_payload(journal, db_filename=None):
         payload = load_json(row["payload_json"], {})
         ev(seconds(row["created_at"], start), "scale", payload.get("agent_id") or "manager", None, row["kind"], payload=payload)
 
+    for trace in traces:
+        ev(
+            trace["startedAt"],
+            "trace",
+            trace.get("agentId"),
+            trace.get("itemId"),
+            trace.get("title") or trace.get("kind") or "trace",
+            traceId=trace["id"],
+            status=trace.get("status"),
+            durationMs=trace.get("durationMs"),
+            runId=trace.get("runId"),
+        )
+
     events.sort(key=lambda e: (e["t"], e["kind"]))
     t_max = max([e["t"] for e in events] + [0]) + 5
     t_now = t_max
@@ -757,6 +853,7 @@ def build_payload(journal, db_filename=None):
         "hypotheses": hypothesis_items,
         "agents": agents,
         "events": events,
+        "traces": traces,
         "series": series,
     }
 
@@ -769,6 +866,17 @@ def build_payload(journal, db_filename=None):
 WORLD_FACTORY_JS = r"""
   function appWorld(payload) {
     const maximize = String(payload.meta.direction || 'minimize').toLowerCase() === 'maximize';
+    payload.traces = Array.isArray(payload.traces) ? payload.traces : [];
+    payload.traceById = {};
+    payload.tracesByAgent = {};
+    payload.tracesByItem = {};
+    payload.tracesByRun = {};
+    payload.traces.forEach((tr) => {
+      payload.traceById[tr.id] = tr;
+      if (tr.agentId) (payload.tracesByAgent[tr.agentId] || (payload.tracesByAgent[tr.agentId] = [])).push(tr);
+      if (tr.itemId) (payload.tracesByItem[tr.itemId] || (payload.tracesByItem[tr.itemId] = [])).push(tr);
+      if (tr.runId) (payload.tracesByRun[tr.runId] || (payload.tracesByRun[tr.runId] = [])).push(tr);
+    });
     function statusAt(n, T) {
       if (T < n.tProposed) return 'unborn';
       if (n.abandoned) return T > n.tProposed + 18 ? 'abandoned' : 'queued';

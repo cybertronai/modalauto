@@ -184,7 +184,108 @@
     return { r: 0, op: 0 };
   }
 
-  function EvoTree({ T, selected, onSelect, density, scoreLabels, dimOffLineage }) {
+  function artifactUrl(path) {
+    return '/api/artifact?path=' + encodeURIComponent(path);
+  }
+
+  function nodeArtifact(node) {
+    return node && node.artifact ? node.artifact.details : null;
+  }
+
+  function mediaFiles(artifact) {
+    const images = artifact && Array.isArray(artifact.images) ? artifact.images : [];
+    const videos = artifact && Array.isArray(artifact.videos) ? artifact.videos : [];
+    return { images, videos };
+  }
+
+  function HoverVoxelBody({ artifact }) {
+    const body = artifact && artifact.body;
+    const grid = body && Array.isArray(body.grid) ? body.grid : null;
+    if (!grid || !grid.length) return null;
+    const cols = Math.max(1, ...grid.map((row) => Array.isArray(row) ? row.length : 0));
+    return (
+      <div className="hover-voxel-grid" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+        {grid.flatMap((row, y) => row.map((cell, x) => (
+          <span key={y + ':' + x} className={'voxel v' + cell} />
+        )))}
+      </div>
+    );
+  }
+
+  function HoverMedia({ artifact }) {
+    const { images, videos } = mediaFiles(artifact);
+    const file = videos[0] || images[0];
+    if (!file) return null;
+    if (videos[0]) {
+      return <video className="hover-preview-media" src={artifactUrl(file.path)} autoPlay muted loop playsInline />;
+    }
+    return <img className="hover-preview-media" src={artifactUrl(file.path)} alt={file.name || 'artifact preview'} />;
+  }
+
+  function HoverMetrics({ artifact }) {
+    const entries = Object.entries((artifact && artifact.metrics) || {}).filter(([, value]) => value != null).slice(0, 4);
+    if (!entries.length) return null;
+    return (
+      <div className="hover-preview-metrics">
+        {entries.map(([key, value]) => (
+          <div key={key} className="prow">
+            <span className="pk">{key.replace(/_/g, ' ')}</span>
+            <span className="pv">{typeof value === 'number' ? fmtScore(value) : Array.isArray(value) ? value.join(', ') : String(value)}</span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  function HoverCustomVisualization({ view, node }) {
+    const registry = window.AutoresearchVisualizations || {};
+    const Comp = registry[view.type] || (view.component ? window[view.component] : null);
+    if (!Comp) return null;
+    return (
+      <div className="hover-preview-custom">
+        <Comp node={node} view={view} app={E} speed={1} artifactUrl={artifactUrl} fmt={fmtScore} compact={true} />
+      </div>
+    );
+  }
+
+  function HoverPreviewContent({ node }) {
+    const artifact = nodeArtifact(node);
+    const views = Array.isArray(E.meta.visualizations) ? E.meta.visualizations.filter((v) => v && v.type) : [];
+    const known = new Set(['matmul_ir', 'matmul_playback', 'voxel_grid', 'metrics', 'media', 'artifact_media', 'rollout_media', 'artifact_files', 'artifact_bundle']);
+    const configured = views.length ? views : [{ type: 'artifact_bundle' }];
+    const { images, videos } = mediaFiles(artifact);
+    const hasMedia = images.length || videos.length;
+    const body = artifact && artifact.body;
+    const hasBody = body && Array.isArray(body.grid) && body.grid.length;
+    const metrics = Object.entries((artifact && artifact.metrics) || {}).filter(([, value]) => value != null);
+    const hasMetrics = metrics.length > 0;
+    const registry = window.AutoresearchVisualizations || {};
+    const mediaTypes = new Set(['media', 'artifact_media', 'rollout_media', 'artifact_bundle']);
+    if (hasMedia && configured.some((view) => mediaTypes.has(view.type))) {
+      return <HoverMedia artifact={artifact} />;
+    }
+    for (const view of configured) {
+      if (view.type === 'matmul_playback' && window.RunPlayback) {
+        return <div className="hover-preview-custom"><window.RunPlayback node={node} speed={1} /></div>;
+      }
+      if (view.type === 'voxel_grid' || view.type === 'artifact_bundle') {
+        if (hasBody) return <HoverVoxelBody artifact={artifact} />;
+      }
+      if (view.type === 'metrics') {
+        if (hasMetrics) return <HoverMetrics artifact={artifact} />;
+      }
+      if (!known.has(view.type)) {
+        const Comp = registry[view.type] || (view.component ? window[view.component] : null);
+        if (Comp) return <HoverCustomVisualization view={view} node={node} />;
+      }
+    }
+    if (hasMedia) return <HoverMedia artifact={artifact} />;
+    if (hasBody) return <HoverVoxelBody artifact={artifact} />;
+    if (hasMetrics) return <HoverMetrics artifact={artifact} />;
+    return <div className="tt-meta">No visual artifact for this run.</div>;
+  }
+
+  function EvoTree({ T, selected, onSelect, density, scoreLabels, dimOffLineage, hoverPreviewIds = [], onToggleHoverPreview }) {
     const world = window.APP || E;
     E = world;
     const tree = useMemo(() => buildTreeLayout(world), [world]);
@@ -193,6 +294,23 @@
     const [view, setView] = useState({ k: 1, tx: 0, ty: 0, ready: false });
     const drag = useRef(null);
     const [hover, setHover] = useState(null);
+    const hoverClear = useRef(null);
+    const hoverPreviewSet = useMemo(() => new Set(hoverPreviewIds), [hoverPreviewIds]);
+    const showHover = useCallback((next) => {
+      if (hoverClear.current) clearTimeout(hoverClear.current);
+      hoverClear.current = null;
+      setHover(next);
+    }, []);
+    const clearHoverSoon = useCallback(() => {
+      if (hoverClear.current) clearTimeout(hoverClear.current);
+      hoverClear.current = setTimeout(() => {
+        hoverClear.current = null;
+        setHover(null);
+      }, 180);
+    }, []);
+    useEffect(() => () => {
+      if (hoverClear.current) clearTimeout(hoverClear.current);
+    }, []);
 
     // fit to container on mount / resize
     const fit = useCallback(() => {
@@ -288,6 +406,22 @@
       const c2 = pb.x - dx * 0.24;
       return `M${pa.x} ${pa.y} C ${c1} ${pa.y}, ${c2} ${pb.y}, ${pb.x} ${pb.y}`;
     }
+    function tipStyle(p, wide) {
+      const sx = p.x * view.k + view.tx;
+      const sy = p.y * view.k + view.ty;
+      const el = wrapRef.current;
+      const hostW = el ? el.clientWidth : window.innerWidth;
+      const hostH = el ? el.clientHeight : window.innerHeight;
+      const w = wide ? 364 : 252;
+      const h = wide ? 430 : 190;
+      const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+      let left = sx + 14;
+      if (left + w > hostW - 12) left = sx - w - 14;
+      return {
+        left: clamp(left, 12, Math.max(12, hostW - w - 12)),
+        top: clamp(sy - 8, 12, Math.max(12, hostH - h - 12)),
+      };
+    }
 
     return (
       <div className="tree-host" ref={wrapRef}
@@ -331,8 +465,8 @@
                   strokeWidth={12}
                   vectorEffect="non-scaling-stroke"
                   style={{ cursor: 'help' }}
-                  onPointerEnter={() => setHover({ transfer: edge, p: mid })}
-                  onPointerLeave={() => setHover(null)}
+                  onPointerEnter={() => showHover({ transfer: edge, p: mid })}
+                  onPointerLeave={clearHoverSoon}
                 />
               </g>;
             })}
@@ -349,13 +483,23 @@
               const p = P[n.id];
               const isSel = n.id === selected;
               const dim = dimOffLineage && selected && !lineage.has(n.id);
+              const previewOn = hoverPreviewSet.has(n.id);
               return <g
-                key={n.id} transform={`translate(${p.x} ${p.y})`}
+                key={n.id} data-node-id={n.id} transform={`translate(${p.x} ${p.y})`}
                 style={{ cursor: 'pointer', transition: 'opacity .4s' }} opacity={dim ? 0.28 : v.op}
                 onClick={(e) => { e.stopPropagation(); if (!drag.current || !drag.current.moved) onSelect(n.id, { shift: e.shiftKey }); }}
-                onPointerEnter={() => setHover({ n, st, p })} onPointerLeave={() => setHover(null)}
+                onPointerEnter={() => showHover({ n, st, p })} onPointerLeave={clearHoverSoon}
               >
                 {v.glow ? <circle r={r + 6 / Math.sqrt(Math.max(1, view.k))} fill="var(--accent-soft)" /> : null}
+                {previewOn ? <circle
+                  className="hover-preview-ring"
+                  r={r + 8 / Math.sqrt(Math.max(1, view.k))}
+                  fill="none"
+                  stroke="var(--accent)"
+                  strokeWidth={1.7}
+                  strokeDasharray="3 3"
+                  vectorEffect="non-scaling-stroke"
+                /> : null}
                 <circle
                   r={r} fill={v.fill} stroke={v.glow ? 'var(--accent)' : v.stroke}
                   strokeWidth={v.glow ? 2 : (v.stroke !== 'none' ? 1.6 : 0)}
@@ -376,7 +520,9 @@
         {/* hover tooltip (screen-space) */}
         {hover && hover.transfer ? <div
           className="tree-tip transfer-tip"
-          style={{ left: hover.p.x * view.k + view.tx + 14, top: hover.p.y * view.k + view.ty - 8 }}
+          style={tipStyle(hover.p, false)}
+          onPointerEnter={() => showHover(hover)}
+          onPointerLeave={clearHoverSoon}
         >
           <div className="tt-head">
             <span className="mono tt-id">{'gene transfer'}</span>
@@ -393,9 +539,36 @@
                   hover.transfer.transferred.tile ? JSON.stringify(hover.transfer.transferred.tile) : null,
                 ].filter(Boolean).join(' · ') || 'structural transfer'}</div>
             : null}
+        </div> : hover && hoverPreviewSet.has(hover.n.id) ? <div
+          className="tree-tip tree-preview-tip interactive"
+          style={tipStyle(hover.p, true)}
+          onPointerEnter={() => showHover(hover)}
+          onPointerLeave={clearHoverSoon}
+        >
+          <div className="tt-head">
+            <span className="mono tt-id">{hover.n.id}</span>
+            <span className={`pill`} data-status={pillStatus(hover.st)}>
+              <span className="dot" />{hover.st}</span></div>
+          <div className="tt-title">{hover.n.title}</div>
+          {hover.n.score != null && hover.st === 'verified'
+            ? <div className="tt-score mono">{fmtScore(hover.n.score) + ' ' + (E.meta.metric || 'score')}</div>
+            : null}
+          {onToggleHoverPreview ? <div className="tt-actions">
+            <button
+              className="btn preview-toggle tt-preview-btn primary"
+              onClick={(e) => { e.stopPropagation(); onToggleHoverPreview(hover.n.id); }}
+            >
+              {'Hover view on'}
+            </button>
+          </div> : null}
+          <div className="hover-preview-body">
+            <HoverPreviewContent node={hover.n} />
+          </div>
         </div> : hover ? <div
-          className="tree-tip"
-          style={{ left: hover.p.x * view.k + view.tx + 14, top: hover.p.y * view.k + view.ty - 8 }}
+          className={'tree-tip' + (onToggleHoverPreview ? ' interactive' : '')}
+          style={tipStyle(hover.p, false)}
+          onPointerEnter={() => showHover(hover)}
+          onPointerLeave={clearHoverSoon}
         >
           <div className="tt-head">
             <span className="mono tt-id">{hover.n.id}</span>
@@ -406,6 +579,14 @@
             ? <div className="tt-score mono">{fmtScore(hover.n.score) + ' ' + (E.meta.metric || 'score')}</div>
             : <div className="tt-score mono" style={{ color: 'var(--ink-3)' }}>
                 {hover.st === 'rejected' ? 'rejected · ' + (hover.n.semantic) : 'in progress…'}</div>}
+          {onToggleHoverPreview ? <div className="tt-actions">
+            <button
+              className="btn preview-toggle tt-preview-btn"
+              onClick={(e) => { e.stopPropagation(); onToggleHoverPreview(hover.n.id); }}
+            >
+              {'Enable hover view'}
+            </button>
+          </div> : null}
         </div>
           : null}
 
