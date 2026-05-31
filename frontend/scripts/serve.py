@@ -186,6 +186,10 @@ def append_changelog_if_changed(journal):
     payload = build_payload(journal)
     path = changelog_path(journal)
     if not any(counts.get(table, 0) for table in WATCH_TABLES):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
         return payload, db_hash, counts
     last_hash = None
     if path.exists():

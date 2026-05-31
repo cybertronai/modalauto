@@ -238,28 +238,80 @@ def stop_experiment_processes(
         "terminated": [],
         "killed": [],
         "remaining": [],
+        "rounds": [],
     }
     if dry_run or not processes:
         return summary
 
-    for process in processes:
-        try:
-            os.kill(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            continue
-    remaining = wait_for_exit(processes, timeout)
-    terminated = [process for process in processes if not process_alive(process.pid)]
-    summary["terminated"] = [process_summary(process, debug=debug) for process in terminated]
+    seen: dict[int, ProcessInfo] = {process.pid: process for process in processes}
+    terminated: dict[int, ProcessInfo] = {}
+    killed: dict[int, ProcessInfo] = {}
+    remaining: list[ProcessInfo] = []
 
-    for process in remaining:
-        try:
-            os.kill(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            continue
-    still_remaining = wait_for_exit(remaining, 2.0)
-    killed = [process for process in remaining if not process_alive(process.pid)]
-    summary["killed"] = [process_summary(process, debug=debug) for process in killed]
-    summary["remaining"] = [process_summary(process, debug=debug) for process in still_remaining]
+    for round_index in range(8):
+        processes = experiment_processes(exp)
+        for process in processes:
+            seen.setdefault(process.pid, process)
+        if not processes:
+            time.sleep(0.25)
+            processes = experiment_processes(exp)
+            if not processes:
+                remaining = []
+                break
+            for process in processes:
+                seen.setdefault(process.pid, process)
+
+        round_info = {
+            "round": round_index + 1,
+            "matched": len(processes),
+            "processes": [process_summary(process, debug=debug) for process in processes],
+            "terminated": [],
+            "killed": [],
+            "remaining": [],
+        }
+
+        for process in processes:
+            try:
+                os.kill(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+        pending = wait_for_exit(processes, timeout)
+        for process in processes:
+            if not process_alive(process.pid):
+                terminated[process.pid] = process
+        round_info["terminated"] = [
+            process_summary(process, debug=debug)
+            for process in processes
+            if process.pid in terminated
+        ]
+
+        for process in pending:
+            try:
+                os.kill(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                continue
+        still_pending = wait_for_exit(pending, 1.0)
+        for process in pending:
+            if not process_alive(process.pid):
+                killed[process.pid] = process
+        round_info["killed"] = [
+            process_summary(process, debug=debug)
+            for process in pending
+            if process.pid in killed
+        ]
+        round_info["remaining"] = [process_summary(process, debug=debug) for process in still_pending]
+        summary["rounds"].append(round_info)
+        remaining = still_pending
+        time.sleep(0.25)
+
+    final_remaining = experiment_processes(exp)
+    for process in final_remaining:
+        seen.setdefault(process.pid, process)
+    summary["matched"] = len(seen)
+    summary["processes"] = [process_summary(process, debug=debug) for process in seen.values()]
+    summary["terminated"] = [process_summary(process, debug=debug) for process in terminated.values()]
+    summary["killed"] = [process_summary(process, debug=debug) for process in killed.values()]
+    summary["remaining"] = [process_summary(process, debug=debug) for process in (final_remaining or remaining)]
     return summary
 
 
@@ -280,33 +332,47 @@ def clear_runs(
     planned = []
     removed = []
     skipped = []
-    for target in targets:
-        exists = target.path.exists()
-        safe = is_safe_generated_path(target.path, exp.root)
-        item = {
-            "path": str(target.path),
-            "label": target.label,
-            "exists": exists,
-            "safe": safe,
-        }
-        planned.append(item)
-        if not exists:
-            continue
-        if not safe:
-            skipped.append({**item, "reason": "outside generated experiment paths"})
-            continue
-        if not dry_run:
-            remove_path(target.path)
-            removed.append(item)
-    if not dry_run and reinit:
-        team_journal.init_db(exp.team_db)
-        exp.worktree_root.mkdir(parents=True, exist_ok=True)
+    final_stop_result = {"enabled": False}
+
+    for clear_pass in range(2):
+        for target in targets:
+            exists = target.path.exists()
+            safe = is_safe_generated_path(target.path, exp.root)
+            item = {
+                "path": str(target.path),
+                "label": target.label,
+                "exists": exists,
+                "safe": safe,
+            }
+            if clear_pass == 0:
+                planned.append(item)
+            if not exists:
+                continue
+            if not safe:
+                if clear_pass == 0:
+                    skipped.append({**item, "reason": "outside generated experiment paths"})
+                continue
+            if not dry_run:
+                remove_path(target.path)
+                removed.append(item)
+        if dry_run:
+            break
+        if reinit:
+            team_journal.init_db(exp.team_db)
+            exp.worktree_root.mkdir(parents=True, exist_ok=True)
+        if not stop_agents:
+            break
+        final_stop_result = stop_experiment_processes(exp, timeout=min(stop_timeout, 2.0), dry_run=False, debug=debug)
+        if not final_stop_result.get("matched"):
+            break
+        targets = generated_targets(exp, keep_worktrees=keep_worktrees)
     return {
         "experiment": exp.name,
         "experiment_root": str(exp.root),
         "dry_run": dry_run,
         "reinitialized": bool(not dry_run and reinit),
         "processes": stop_result,
+        "final_processes": final_stop_result,
         "planned": planned,
         "removed": removed,
         "skipped": skipped,
