@@ -70,23 +70,13 @@ python bin/autoresearch-agent topline_manager --experiment matmul --agent-id man
 python bin/autoresearch-team --experiment matmul status
 ```
 
-Clear generated state when you want the next run to start from scratch. The
-command is a dry run unless `--yes` is passed; with `--yes` it also stops local
-agents for that experiment before deleting generated files:
+Clear generated state for a fresh run. The command is a dry run unless `--yes`
+is passed:
 
 ```bash
 python bin/autoresearch-clear-runs --experiment matmul
 python bin/autoresearch-clear-runs --experiment matmul --yes
-python bin/autoresearch-clear-runs --experiment matmul --yes --debug
 ```
-
-The clear command removes generated journal artifacts, notes, message-board
-files, SQLite DBs and sidecars, agent worktrees, and generated frontend exports,
-then recreates an empty team journal. Use `--keep-worktrees` to leave worktrees
-in place, `--no-reinit` to skip recreating the empty DB, or `--no-stop-agents`
-only when you have already stopped the run yourself. After clearing, reload the
-frontend; `python bin/autoresearch-team --experiment matmul status` should show
-no agents, hypotheses, submissions, or best frontier entries.
 
 This is the main autoresearch loop. The topline manager reads `experiments/matmul/workflow.json`, applies the scale plan, and spawns the rest of the team. All generated state stays inside the experiment folder:
 
