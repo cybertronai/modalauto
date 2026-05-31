@@ -155,10 +155,10 @@
     );
   }
 
-  function TraceDetail({ world, traceId, onClose }) {
+  function TraceDetail({ world, traceId, onClose, detailRef }) {
     const trace = traceFor(world, traceId);
     if (!trace) return (
-      <div className="proc-card proc-trace-card">
+      <div className="proc-card proc-trace-card" ref={detailRef}>
         <div className="proc-card-head"><h3>Trace</h3><button className="btn" onClick={onClose}>Close</button></div>
         <div className="proc-empty">Select an agent, work item, or trace event.</div>
       </div>
@@ -166,7 +166,7 @@
     const spans = Array.isArray(trace.spans) ? trace.spans : [];
     const maxMs = Math.max(1, ...spans.map((s) => s.durationMs || 0));
     return (
-      <div className="proc-card proc-trace-card">
+      <div className="proc-card proc-trace-card" ref={detailRef}>
         <div className="proc-card-head">
           <h3>Trace</h3>
           <div className="proc-card-actions">
@@ -230,12 +230,22 @@
     const [T, setT] = useState(() => (window.APP && window.APP.meta.tNow) || 0);
     const [playing, setPlaying] = useState(false);
     const [selectedTrace, setSelectedTrace] = useState(null);
+    const traceDetailRef = useRef(null);
     useEffect(() => {
       if (!world || !playing) return;
       const step = Math.max(0.05, world.meta.tMax / 700);
       const id = setInterval(() => setT((cur) => cur >= world.meta.tMax ? world.meta.tMax : Math.min(world.meta.tMax, cur + step)), 33);
       return () => clearInterval(id);
     }, [world, playing]);
+    useEffect(() => {
+      if (!selectedTrace) return;
+      const id = setTimeout(() => {
+        if (traceDetailRef.current) {
+          traceDetailRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }, 0);
+      return () => clearTimeout(id);
+    }, [selectedTrace]);
     useEffect(() => {
       let stopped = false;
       async function load() {
@@ -276,7 +286,7 @@
             <RolePool world={world} T={T} onTrace={setSelectedTrace} />
             <WorkQueues world={world} T={T} onTrace={setSelectedTrace} />
             <EventStream world={world} T={T} onTrace={setSelectedTrace} />
-            {selectedTrace ? <TraceDetail world={world} traceId={selectedTrace} onClose={() => setSelectedTrace(null)} /> : null}
+            {selectedTrace ? <TraceDetail world={world} traceId={selectedTrace} onClose={() => setSelectedTrace(null)} detailRef={traceDetailRef} /> : null}
           </div>
         </main>
         <footer className="bottom"><ProcessScrubber world={world} T={T} setT={setT} playing={playing} setPlaying={setPlaying} /></footer>
