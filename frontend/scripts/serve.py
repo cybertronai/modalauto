@@ -16,15 +16,26 @@ from export_real_data import build_payload, detect_db, render_js, render_runs_js
 AUTORESEARCH_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = AUTORESEARCH_ROOT
 DEFAULT_AUTORESEARCH = AUTORESEARCH_ROOT
+START_CWD = Path.cwd().resolve()
 CHANGELOG_NAME = "frontend_changelog.jsonl"
 WATCH_TABLES = ["agents", "hypotheses", "submissions", "verifications", "manager_events"]
 CONTROL_TABLES = ["branch_controls", "control_actions"]
 
 
-def pick_journal():
+def configured_journal_path():
     configured = os.environ.get("FRONTEND_JOURNAL")
+    if not configured:
+        return None
+    path = Path(configured).expanduser()
+    if not path.is_absolute():
+        path = START_CWD / path
+    return path.resolve()
+
+
+def pick_journal():
+    configured = configured_journal_path()
     if configured:
-        return Path(configured).expanduser().resolve()
+        return configured
     candidates = [
         p for p in (DEFAULT_AUTORESEARCH / "experiments").glob("*/journal")
         if detect_db(p).exists()
@@ -47,10 +58,9 @@ def journal_mtime_ns(journal):
 def discover_journals():
     """All experiment journal dirs with a team_journal.db, newest first.
     Honors FRONTEND_JOURNAL to pin a single journal (matches pick_journal)."""
-    configured = os.environ.get("FRONTEND_JOURNAL")
+    configured = configured_journal_path()
     if configured:
-        p = Path(configured).expanduser().resolve()
-        return [p] if detect_db(p).exists() else []
+        return [configured] if detect_db(configured).exists() else []
     candidates = [
         p for p in (DEFAULT_AUTORESEARCH / "experiments").glob("*/journal")
         if detect_db(p).exists()
@@ -71,7 +81,7 @@ def build_runs(journals):
     for journal in journals:
         payload = build_payload(journal)
         if not payload.get("nodes"):
-            continue  # empty journal — skip so the mock fallback can fill in
+            continue
         meta = payload["meta"]
         meta["label"] = run_label(journal)
         best = meta.get("best")
@@ -405,8 +415,9 @@ class AutoresearchHandler(SimpleHTTPRequestHandler):
         if path == "/real-runs.js":
             self.end_no_cache_headers("text/javascript; charset=utf-8")
             try:
-                runs = build_runs(discover_journals())
-                if not runs:
+                journals = discover_journals()
+                runs = build_runs(journals)
+                if not runs and not journals:
                     self.wfile.write(b"console.warn('Autoresearch: no populated journals; using mock runs');\n")
                     return
                 self.wfile.write(render_runs_js(runs).encode("utf-8"))
