@@ -5,8 +5,8 @@
    branch diff panel. Click any node to reassign the active branch. */
 (function () {
   const { useState, useRef, useMemo, useEffect, useCallback } = React;
-  const RUNS = window.EVO_RUNS;
-  const BY = window.EVO_RUN_BY_ID;
+  const RUNS = window.EVO_RUNS || [];
+  const BY = window.EVO_RUN_BY_ID || {};
   const fmt = (n) => {
     if (n == null) return '—';
     if (typeof n !== 'number') return String(n);
@@ -514,6 +514,30 @@
   }
 
   function App() {
+    if (!RUNS.length) {
+      return (
+        <div className="capp">
+          <header className="ctop">
+            <div className="top-left">
+              <a className="logo" href="index.html" title="Back to dashboard">
+                <svg viewBox="0 0 34 34" width={24} height={24} fill="none">
+                  <circle cx={6} cy={17} r={3} fill="var(--fit-1)" /><circle cx={17} cy={8} r={2.6} fill="var(--fit-3)" />
+                  <circle cx={17} cy={26} r={2.6} fill="var(--fit-2)" /><circle cx={28} cy={6} r={3.4} fill="var(--cmp-a)" />
+                  <circle cx={28} cy={20} r={2.4} fill="var(--fit-4)" /><path d="M9 17 L14.6 9 M9 17 L14.6 25 M19.4 8 L26 6.5 M19.4 8 L26 19 M19.4 26 L26 27.5" stroke="var(--line-strong)" strokeWidth={1.2} />
+                </svg>
+                <span className="logo-name">Autoresearch</span>
+              </a>
+              <nav className="nav-tabs">
+                <a className="nav-tab" href="index.html">Tree</a>
+                <a className="nav-tab active" href="compare.html">Compare</a>
+                <a className="nav-tab" href="process.html">Process</a>
+              </nav>
+            </div>
+          </header>
+          <div className="empty-compare" />
+        </div>
+      );
+    }
     const [runId, setRunId] = useState(() => (RUNS && RUNS[0] ? RUNS[0].id : 'panel'));
     const run = BY[runId] || RUNS[0]; const world = run.world;
     const cA = 'var(--cmp-a)', cB = 'var(--cmp-b)';
