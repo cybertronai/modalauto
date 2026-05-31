@@ -1,0 +1,32 @@
+{
+  "source": {
+    "env": "examples/hide_and_seek_quadrant.jsonnet",
+    "seed": 0
+  },
+  "worlds": 16,
+  "updates": 2,
+  "horizon": 20,
+  "checkpoint": "/root/openai_hide_and_seek/mjwarp_smoke_policy.npz",
+  "history": [
+    {
+      "update": 0,
+      "mean_visibility_selfplay_reward": 0.0,
+      "best_visibility_selfplay_reward": 0.0,
+      "caught_fraction": 0.979167,
+      "theta_norm": 0.0
+    },
+    {
+      "update": 1,
+      "mean_visibility_selfplay_reward": 0.005208,
+      "best_visibility_selfplay_reward": 0.083333,
+      "caught_fraction": 0.96875,
+      "theta_norm": 0.764017
+    }
+  ],
+  "objective": "visibility_selfplay",
+  "prep_fraction": 0.4,
+  "snapshot_pool_size": 2,
+  "final_mean_visibility_selfplay_reward": 0.078125,
+  "final_best_visibility_selfplay_reward": 0.083333,
+  "final_caught_fraction": 1.0
+}

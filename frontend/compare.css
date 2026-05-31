@@ -21,6 +21,7 @@
 
 /* ---- branch-compare layout: main tree on top, snapshots below | diff panel ---- */
 .cbody4 { display: grid; grid-template-columns: 1fr 346px; min-height: 0; }
+.empty-compare { min-height: 0; background: var(--bg-canvas); background-image: radial-gradient(var(--grid) 1px, transparent 1px); background-size: 24px 24px; }
 .evo-main { display: grid; grid-template-rows: 1.35fr 1fr; min-height: 0; border-right: 1px solid var(--line); }
 .evo-tree { position: relative; min-height: 0; background: var(--bg-canvas); background-image: radial-gradient(var(--grid) 1px, transparent 1px); background-size: 24px 24px; }
 .evo-svg { width: 100%; height: 100%; display: block; }

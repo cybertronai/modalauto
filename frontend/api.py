@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -120,7 +121,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
-        if path not in {"/api/data", "/api/status", "/api/tasks", "/api/trace"}:
+        if path not in {"/api/data", "/api/status", "/api/tasks", "/api/trace", "/api/artifact"}:
             self.send_json({"error": "not_found"}, 404)
             return
         journal = select_journal(parsed.query, self.journal)
@@ -134,13 +135,32 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"journal": str(journal), "db": str(detect_db(journal))})
             return
         if path == "/api/trace":
-            from urllib.parse import parse_qs
             node_id = (parse_qs(parsed.query).get("node") or [None])[0]
             if not node_id:
                 self.send_json({"ok": False, "error": "missing node"}, 400)
                 return
             tr = node_trace(journal, node_id)
             self.send_json(tr or {"ok": False, "error": "no_artifact"})
+            return
+        if path == "/api/artifact":
+            raw_path = (parse_qs(parsed.query).get("path") or [""])[0]
+            try:
+                artifact_path = Path(raw_path).expanduser().resolve()
+                artifact_path.relative_to(journal.resolve())
+            except (OSError, ValueError):
+                self.send_json({"ok": False, "error": "artifact not found"}, 404)
+                return
+            if not artifact_path.exists() or not artifact_path.is_file():
+                self.send_json({"ok": False, "error": "artifact not found"}, 404)
+                return
+            body = artifact_path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", mimetypes.guess_type(str(artifact_path))[0] or "application/octet-stream")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store, max-age=0")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         payload = build_payload(journal)
         self.send_json({"journal": str(journal), "db": str(detect_db(journal)), "payload": payload})

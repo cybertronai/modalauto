@@ -184,7 +184,11 @@
     );
   }
 
-  function mmss(t) { return String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(Math.round(t % 60)).padStart(2, '0'); }
+  function mmss(t) {
+    const safe = typeof t === 'number' && Number.isFinite(t) ? Math.max(0, t) : 0;
+    const total = Math.round(safe);
+    return String(Math.floor(total / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
+  }
 
   Object.assign(window, { TeamPanel, HypothesesPanel, ActivityPanel, SBSection: Section, SBChevron: Chevron, SBRolePill: RolePill,
     EVO_ROLE_LABEL: ROLE_LABEL, EVO_ROLE_VAR: ROLE_VAR, evoRoleCol: roleCol, evoMMSS: mmss });

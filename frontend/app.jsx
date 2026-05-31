@@ -27,7 +27,12 @@
     const maximumFractionDigits = Number.isInteger(n) ? 0 : abs >= 100 ? 2 : abs >= 1 ? 3 : 4;
     return n.toLocaleString(undefined, { maximumFractionDigits });
   };
-  const mmss = (t) => String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(Math.round(t % 60)).padStart(2, '0');
+  const finiteTime = (t, fallback = 0) => (typeof t === 'number' && Number.isFinite(t) ? t : fallback);
+  const mmss = (t) => {
+    const safe = Math.max(0, finiteTime(t));
+    const total = Math.round(safe);
+    return String(Math.floor(total / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
+  };
   const directionLabel = () => String((E && E.meta && E.meta.direction) || 'minimize').toLowerCase() === 'maximize' ? 'maximize' : 'minimize';
   const initialTask = () => new URLSearchParams(window.location.search).get('journal') || localStorage.getItem('autoresearch-task') || '';
   const apiUrl = (path, task, params) => {
@@ -354,6 +359,7 @@
             <nav className="nav-tabs">
               <a className="nav-tab active" href="index.html">Tree</a>
               <a className="nav-tab" href="compare.html">Compare</a>
+              <a className="nav-tab" href="process.html">Process</a>
             </nav>
             <TaskSelect tasks={tasks} value={currentTask} onChange={chooseTask} />
             <div className="prob">

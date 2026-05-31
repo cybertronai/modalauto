@@ -6,6 +6,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 
 DEFAULT_BASELINE = 0
@@ -304,6 +305,119 @@ def artifact_details(journal: Path, artifact_path_value, summary: dict, raw_buck
     }
 
 
+def _submission_artifact_dir(journal, artifact_path):
+    art = _resolve_artifact(journal, artifact_path)
+    if art:
+        return art.parent if art.is_file() else art
+    if not artifact_path:
+        return journal / "artifacts"
+    p = Path(artifact_path)
+    if p.is_absolute():
+        return p.parent if p.suffix else p
+    return journal / "artifacts" / p.parent.name if p.parent.name else journal / "artifacts"
+
+
+def _media_path(item):
+    value = item.get("path") or item.get("href") or item.get("url") or item.get("file")
+    return str(value) if value else None
+
+
+def _media_candidates(context, summary):
+    values = []
+    for source in (context, summary):
+        if not isinstance(source, dict):
+            continue
+        media = source.get("media")
+        if isinstance(media, dict):
+            if _media_path(media):
+                values.append(media)
+            else:
+                for key, value in media.items():
+                    if isinstance(value, dict):
+                        values.append({"kind": key, **value})
+                    elif value:
+                        values.append({"kind": key, "path": value})
+        elif isinstance(media, list):
+            values.extend([item for item in media if isinstance(item, dict)])
+        for key in ("timelapse", "timelapse_gif", "preview", "preview_image", "animation"):
+            value = source.get(key)
+            if value:
+                values.append({"kind": "timelapse" if "timelapse" in key or key == "animation" else "preview", "path": value})
+    return values
+
+
+def _media_kind(item):
+    kind = str(item.get("kind") or item.get("role") or item.get("name") or "preview").lower()
+    if "gif" in kind or "time" in kind or "animation" in kind:
+        return "timelapse"
+    return kind
+
+
+def _looks_like_local_media(path):
+    if not path:
+        return False
+    if path.startswith(("http://", "https://", "data:")):
+        return True
+    return Path(path).suffix.lower() in {".gif", ".png", ".jpg", ".jpeg", ".webp", ".mp4", ".webm"}
+
+
+def _artifact_url(path: Path) -> str:
+    return "/api/artifact?path=" + quote(str(path), safe="")
+
+
+def _resolve_media_path(path, artifact_dir, journal):
+    if not path or path.startswith(("http://", "https://", "data:")):
+        return None
+    p = Path(path)
+    candidates = [p] if p.is_absolute() else [artifact_dir / p, journal / p]
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            journal_root = journal.resolve()
+            if resolved.exists() and resolved.is_file() and (resolved == journal_root or journal_root in resolved.parents):
+                return resolved
+        except OSError:
+            continue
+    return None
+
+
+def extract_media(context, summary, artifact_path, journal, hyp_id):
+    artifact_dir = _submission_artifact_dir(journal, artifact_path)
+    out = {}
+    for item in _media_candidates(context, summary):
+        path = _media_path(item)
+        if not _looks_like_local_media(path):
+            continue
+        kind = _media_kind(item)
+        resolved = _resolve_media_path(path, artifact_dir, journal)
+        if path.startswith(("http://", "https://", "data:")):
+            src = path
+        elif resolved:
+            src = _artifact_url(resolved)
+        else:
+            continue
+        out[kind] = {
+            "kind": kind,
+            "src": src,
+            "label": item.get("label") or item.get("title") or kind,
+            "path": str(resolved) if resolved else path,
+            "mime": item.get("mime") or item.get("type"),
+        }
+    if "timelapse" not in out and artifact_dir:
+        for name in ("timelapse.gif", "preview.gif", "run.gif", "timelapse.mp4", "preview.webm"):
+            media_path = artifact_dir / name
+            if media_path.exists():
+                out["timelapse"] = {
+                    "kind": "timelapse",
+                    "src": _artifact_url(media_path.resolve()),
+                    "label": "timelapse",
+                    "path": str(media_path),
+                    "mime": None,
+                }
+                break
+    return out or None
+
+
 def node_trace(journal, hyp_id, n=16):
     """LIVE real execution trace for one hypothesis node — reads its best
     submission's real `best.ir` and runs the real scorer's `trace_run`.
@@ -475,6 +589,7 @@ def build_payload(journal, db_filename=None):
         family = family_from(context, summary)
         candidate = best.get("name") or summary.get("name") or family or hyp["id"]
         artifact = {"details": artifact_details(journal, sub.get("artifact_path"), summary, raw_buckets)} if sub else {}
+        media = extract_media(context, summary, sub["artifact_path"] if sub else None, journal, hyp_id)
         proposer_role = next((a["role"] for a in agents if a["id"] == hyp["proposer_agent_id"]), "creative_explorer")
         is_transfer = evolution.get("event") == "horizontal_transfer"
         if is_transfer:
@@ -506,6 +621,7 @@ def build_payload(journal, db_filename=None):
             "evolution": evolution,
             "rationale": hyp["rationale"],
             "expectedMovement": hyp["expected_movement"],
+            "media": media,
         })
         if ver is None:
             excluded_tree_items += 1
@@ -560,6 +676,7 @@ def build_payload(journal, db_filename=None):
             "isTransfer": is_transfer,
             "halted": hyp_id in halted_branches,
             "evolution": evolution,
+            "media": media,
         })
 
     normalize_display_parents(nodes)

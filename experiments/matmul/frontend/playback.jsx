@@ -1,4 +1,4 @@
-/* RunPlayback — fast-forward animation of a candidate's matmul run.
+/* MatmulPlayback — fast-forward animation of a candidate's matmul run.
    The 16x16 output grid fills as panels are computed; ops fire in sequence.
    Scrubbable + auto-play. Cells updated imperatively for smoothness. */
 (function () {
@@ -35,7 +35,7 @@
     return { ops, cellDoneOp, pw, ph };
   }
 
-  function RunPlayback({ node, speed }) {
+  function MatmulPlayback({ node, speed, timelapse = null }) {
     // REAL execution trace, fetched live from /api/trace (reads the node's
     // best.ir and runs the experiment's real simulator). Falls back to a
     // representative synthetic run only when no real artifact is available.
@@ -135,7 +135,9 @@
       setPlaying(false);
     };
 
-    const srcLabel = isReal
+    const srcLabel = timelapse
+      ? 'branch timelapse available'
+      : isReal
       ? ('real trace · ' + (real.totalOps || 0).toLocaleString() + ' ops' + (real.energy != null ? ' · ' + real.energy.toLocaleString() + ' energy' : ''))
       : 'representative run';
 
@@ -163,5 +165,6 @@
     );
   }
 
-  window.RunPlayback = RunPlayback;
+  window.MatmulPlayback = MatmulPlayback;
+  window.RunPlayback = MatmulPlayback;
 })();

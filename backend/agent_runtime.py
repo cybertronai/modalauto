@@ -123,6 +123,101 @@ def runner_command(args: argparse.Namespace, run_id: str, hyp_path: Path) -> lis
     return cmd
 
 
+def console_feedback(args: argparse.Namespace, message: str) -> None:
+    stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+    print(f"[{stamp}] {message}", flush=True)
+
+
+ROLE_LABELS = {
+    "creative_explorer": "explore",
+    "global_searcher": "global",
+    "implementor": "impl",
+    "insight_generator": "insight",
+    "meta_agent": "meta",
+    "researcher": "research",
+    "topline_manager": "mgr",
+    "verifier": "verify",
+}
+
+
+def role_label(role: object) -> str:
+    return ROLE_LABELS.get(str(role), str(role))
+
+
+def short_run_id(run_id: object) -> str:
+    text = str(run_id or "")
+    parts = text.split("_")
+    if len(parts) >= 2:
+        return f"{parts[0]}/{parts[1]}"
+    return text
+
+
+def role_count_text(counts: dict[str, object]) -> str:
+    total = sum(int(value) for value in counts.values())
+    impl = int(counts.get("implementor", 0))
+    verifier = int(counts.get("verifier", 0))
+    return f"{total} impl={impl} ver={verifier}"
+
+
+def action_count_text(actions: list[dict[str, object]]) -> str:
+    counts: dict[tuple[str, str], int] = {}
+    for action in actions:
+        key = (str(action.get("action")), str(action.get("role")))
+        counts[key] = counts.get(key, 0) + 1
+    if not counts:
+        return "-"
+    markers = {"spawn": "+", "retire": "-"}
+    return ",".join(
+        f"{markers.get(action, action)}{role_label(role)}x{count}"
+        for (action, role), count in sorted(counts.items())
+    )
+
+
+def best_score_text(best: dict | None) -> str:
+    if not best:
+        return "none"
+    score = best.get("official_score")
+    if score is None:
+        return "none"
+    return str(score)
+
+
+def error_tail(value: object) -> str:
+    lines = [line.strip() for line in str(value or "").splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
+def init_feedback_offsets(args: argparse.Namespace) -> None:
+    args.feedback_offsets = {}
+    for channel in ["global"]:
+        args.feedback_offsets[channel] = len(message_board.read_jsonl(message_board.channel_path(args.board, channel)))
+
+
+def format_relay_message(msg: dict[str, object]) -> str | None:
+    kind = msg.get("kind")
+    sender = msg.get("from")
+    payload = msg.get("payload") if isinstance(msg.get("payload"), dict) else {}
+    if kind == "agent_started":
+        return None
+    if kind == "experiment_started":
+        return f"run+ {short_run_id(payload.get('run_id'))} {sender} strat={payload.get('strategy')}"
+    if kind == "experiment_completed":
+        return f"run= {short_run_id(payload.get('run_id'))} best={payload.get('best_name')} score={payload.get('score')}"
+    if kind == "experiment_skipped":
+        return f"run~ {short_run_id(payload.get('run_id'))} {payload.get('status')}"
+    if kind == "implementor_failed":
+        return f"run! {short_run_id(payload.get('run_id'))} rc={payload.get('returncode')} {error_tail(msg.get('body'))}"
+    if kind == "verification":
+        return None
+    if kind == "agent_error":
+        return f"err {sender} {payload.get('role')} {error_tail(msg.get('body'))}"
+    return None
+
+
+def relay_feedback_messages(args: argparse.Namespace) -> None:
+    return
+
+
 def best_frontier_for_args(args: argparse.Namespace, db) -> dict:
     return team_journal.best_frontier(db, maximize=workflow_maximize(args))
 
@@ -1287,6 +1382,15 @@ def run_implementor_step(args: argparse.Namespace) -> None:
             cmd.extend(["--avoid-candidates-json", json.dumps(sorted(set(prior_candidates)))])
     if args.disable_meta_operator and domain == "matmul":
         cmd.append("--disable-meta-operator")
+    post(args.board, args.agent_id, "global", "experiment_started", f"launching {run_id}", {
+        "run_id": run_id,
+        "hypothesis_id": hyp["id"],
+        "title": hyp.get("title"),
+        "strategy": strategy,
+        "command": cmd,
+        "hypothesis_json": str(hyp_path),
+    })
+    console_feedback(args, f"run+ {short_run_id(run_id)} strat={strategy}")
     proc = subprocess.run(cmd, cwd=str(REPO_ROOT), text=True, capture_output=True, timeout=args.step_timeout)
     worktree = Path(hyp.get("worktree_path") or args.worktree_root / args.agent_id)
     worktree.mkdir(parents=True, exist_ok=True)
@@ -1303,7 +1407,12 @@ def run_implementor_step(args: argparse.Namespace) -> None:
         )
         db.commit()
         db.close()
-        post(args.board, args.agent_id, "global", "implementor_failed", proc.stderr[-1000:], {"hypothesis_id": hyp["id"]})
+        post(args.board, args.agent_id, "global", "implementor_failed", proc.stderr[-1000:], {
+            "run_id": run_id,
+            "hypothesis_id": hyp["id"],
+            "returncode": proc.returncode,
+        })
+        console_feedback(args, f"run! {short_run_id(run_id)} rc={proc.returncode}")
         return
     result = parse_runner_result(proc.stdout)
     artifact_dir = Path(result["artifact_dir"])
@@ -1311,6 +1420,26 @@ def run_implementor_step(args: argparse.Namespace) -> None:
     summary = json.loads(summary_path.read_text()) if summary_path.exists() else dict(result)
     if "best" not in summary and isinstance(result.get("best"), dict):
         summary["best"] = result["best"]
+    if not isinstance(summary.get("best"), dict):
+        db = connect_team(args)
+        stamp = team_journal.now()
+        db.execute("UPDATE hypotheses SET status = 'abandoned', updated_at = ? WHERE id = ?", (stamp, hyp["id"]))
+        db.execute(
+            "UPDATE agents SET status = 'idle', current_item = NULL, last_heartbeat = ?, updated_at = ? WHERE id = ?",
+            (stamp, stamp, args.agent_id),
+        )
+        db.commit()
+        db.close()
+        status = str(summary.get("target_status") or result.get("status") or "no_valid_candidate")
+        post(args.board, args.agent_id, "global", "experiment_skipped", f"skipped {run_id}: {status}", {
+            "run_id": run_id,
+            "hypothesis_id": hyp["id"],
+            "status": status,
+            "strategy": strategy,
+            "artifact_dir": str(artifact_dir),
+        })
+        console_feedback(args, f"run~ {short_run_id(run_id)} {status}")
+        return
     artifact_path = submission_artifact_path(artifact_dir, summary, workflow)
     db = connect_team(args)
     stamp = team_journal.now()
@@ -1347,6 +1476,17 @@ def run_implementor_step(args: argparse.Namespace) -> None:
         "strategy": strategy,
         "artifact_path": str(artifact_path),
     })
+    best = summary.get("best") if isinstance(summary.get("best"), dict) else {}
+    post(args.board, args.agent_id, "global", "experiment_completed", f"completed {run_id}", {
+        "run_id": run_id,
+        "hypothesis_id": hyp["id"],
+        "submission_id": sub_id,
+        "score": best.get("score"),
+        "best_name": best.get("name"),
+        "strategy": strategy,
+        "artifact_path": str(artifact_path),
+    })
+    console_feedback(args, f"run= {short_run_id(run_id)} best={best.get('name')} score={best.get('score')}")
 
 
 def claim_submission(args: argparse.Namespace):
@@ -1445,6 +1585,17 @@ def run_verifier_step(args: argparse.Namespace) -> None:
     try:
         if workflow_domain(workflow) == "evogym":
             semantic, score, bucket_json, error = verify_evogym_submission(path, summary)
+        elif workflow_domain(workflow) == "hide_and_seek_mjwarp":
+            best = summary.get("best") if isinstance(summary, dict) else {}
+            if not isinstance(best, dict) or "score" not in best:
+                raise ValueError("missing MJWarp training score")
+            score = int(best["score"])
+            semantic = "ok"
+            bucket_json = json.dumps({
+                "mean_hider_distance_reward": best.get("mean_hider_distance_reward"),
+                "improvement": best.get("improvement"),
+                "family": best.get("family"),
+            }, sort_keys=True)
         else:
             ir = path.read_text()
             ok, message = verify_general(ir, cases=8, seed=20260530)
@@ -1599,6 +1750,18 @@ def run_manager_step(args: argparse.Namespace) -> None:
     plan = team_journal.scale_plan(state, allow_idle_retire=args.allow_idle_retire)
     peer_counts = recent_peer_intent_counts(args, window_seconds=args.intent_window_seconds)
     intended_actions = subtract_peer_intents(plan["actions"], peer_counts)
+    signals = plan.get("signals", {}) if isinstance(plan.get("signals"), dict) else {}
+    step_label = getattr(args, "step_index", "?")
+    console_feedback(
+        args,
+        f"step {step_label} "
+        f"q={signals.get('queued_hypotheses', 0)} "
+        f"c={signals.get('claimed_hypotheses', 0)} "
+        f"p={signals.get('pending_submissions', 0)} "
+        f"agents={role_count_text(state.get('agents', {}))} "
+        f"best={best_score_text(state.get('best_frontier'))} "
+        f"plan={action_count_text(intended_actions)}",
+    )
     db.execute(
         "INSERT INTO manager_events (kind, payload_json, created_at) VALUES (?, ?, ?)",
         (
@@ -1723,6 +1886,9 @@ def main(argv: list[str] | None = None) -> int:
     args.agent_id = args.agent_id or default_agent_id(args.role)
     register_agent(args)
     post(args.board, args.agent_id, "global", "agent_started", args.role, {"agent_id": args.agent_id})
+    init_feedback_offsets(args)
+    if args.role != "topline_manager":
+        console_feedback(args, f"start {role_label(args.role)} {args.agent_id} exp={exp.name}")
     if recent_global_stop(args.board, args.startup_stop_window_seconds):
         finish(args, "dead")
         post(args.board, args.agent_id, "global", "agent_stopped", "recent stop message on startup", {"agent_id": args.agent_id})
@@ -1732,12 +1898,15 @@ def main(argv: list[str] | None = None) -> int:
     steps = 0
     try:
         while True:
+            relay_feedback_messages(args)
             if should_stop(args):
                 finish(args, "dead")
                 post(args.board, args.agent_id, "global", "agent_stopped", "stop message received", {"agent_id": args.agent_id})
                 return 0
             heartbeat(args)
+            args.step_index = steps + 1
             run_step(args)
+            relay_feedback_messages(args)
             steps += 1
             if args.once or (args.max_steps is not None and steps >= args.max_steps):
                 finish(args, "dead")

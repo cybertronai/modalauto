@@ -4,11 +4,19 @@ import * as THREE from 'three';
 const root = document.querySelector('#app');
 root.innerHTML = `
   <main class="stage">
+    <div class="hud">
+      <div class="phase" id="turnHud">
+        <div id="phaseName">Loading policy</div>
+        <div id="phaseStep">-- / --</div>
+      </div>
+    </div>
     <canvas id="scene" aria-label="Hide-and-seek fort-building animation"></canvas>
   </main>
 `;
 
 const canvas = document.querySelector('#scene');
+const phaseName = document.querySelector('#phaseName');
+const phaseStep = document.querySelector('#phaseStep');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
@@ -95,6 +103,9 @@ const materials = {
 
 const world = new THREE.Group();
 scene.add(world);
+const approximateStatic = [];
+const simStatic = new THREE.Group();
+world.add(simStatic);
 
 function shadow(mesh) {
   mesh.castShadow = true;
@@ -135,6 +146,7 @@ function addWall(x, z, w, d, h = 0.88) {
   const mesh = block(w, h, d, materials.wall, 0.018);
   mesh.position.set(x, 0, z);
   world.add(mesh);
+  approximateStatic.push(mesh);
   return mesh;
 }
 
@@ -142,6 +154,7 @@ function addCityBlock(x, z, w, d, h) {
   const mesh = block(w, h, d, materials.city, 0.025);
   mesh.position.set(x, 0, z);
   world.add(mesh);
+  approximateStatic.push(mesh);
 }
 
 function makeAgent(material, glowMaterial) {
@@ -319,6 +332,7 @@ const floorSize = 10.8;
 const floor = shadow(new THREE.Mesh(new THREE.BoxGeometry(floorSize, 0.15, floorSize), materials.floor));
 floor.position.y = -0.075;
 world.add(floor);
+approximateStatic.push(floor);
 
 const fogWash = new THREE.Mesh(new THREE.PlaneGeometry(floorSize * 0.98, floorSize * 0.98), materials.fog);
 fogWash.rotation.x = -Math.PI / 2;
@@ -402,6 +416,29 @@ const seekerPathA = [[0.55, 3.85], [0.85, 3.35], [1.25, 2.95], [0.55, 3.85]];
 const seekerPathB = [[2.15, 4.15], [2.45, 3.52], [2.9, 3.15], [2.15, 4.15]];
 
 const clock = new THREE.Clock();
+const replay = {
+  data: null,
+  status: 'loading'
+};
+const replayAgents = [hiderA, hiderB, seekerA, seekerB];
+const replayBoxes = [boxA, boxB, boxC];
+const replayRamps = [rampDefense, ramp];
+boxC.visible = false;
+
+fetch('/rollouts/hide_and_seek_quadrant_seed0.json')
+  .then((res) => {
+    if (!res.ok) throw new Error(`rollout HTTP ${res.status}`);
+    return res.json();
+  })
+  .then((data) => {
+    replay.data = data;
+    replay.status = 'ready';
+    buildSimStatic(data.model);
+  })
+  .catch((err) => {
+    replay.status = 'failed';
+    console.error('Failed to load rollout replay', err);
+  });
 
 function phaseBlend(t, start, end) {
   return THREE.MathUtils.smoothstep(t, start, end);
@@ -461,8 +498,164 @@ function setRamp(mesh, a, b, t, rotA = 0, rotB = 0) {
   return p;
 }
 
+function simToScene(pos) {
+  return {
+    x: pos[0] - 3,
+    z: pos[1] - 3,
+    y: pos[2] || 0
+  };
+}
+
+function materialFromRgba(rgba, fallback) {
+  if (!rgba || rgba.length < 3) return fallback;
+  const color = new THREE.Color(rgba[0], rgba[1], rgba[2]);
+  return new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.55,
+    transparent: rgba[3] < 1,
+    opacity: Math.max(0.16, rgba[3])
+  });
+}
+
+function buildSimStatic(model) {
+  if (!model || !Array.isArray(model.geoms)) return;
+  approximateStatic.forEach((mesh) => { mesh.visible = false; });
+  simStatic.clear();
+
+  for (const geom of model.geoms) {
+    if (geom.name === 'floor0') {
+      const size = geom.size;
+      const mesh = shadow(new THREE.Mesh(
+        new THREE.BoxGeometry(size[0] * 2, 0.12, size[1] * 2),
+        materials.floor
+      ));
+      const p = simToScene(geom.pos);
+      mesh.position.set(p.x, -0.06, p.z);
+      simStatic.add(mesh);
+    }
+
+    if (geom.name && geom.name.startsWith('wall')) {
+      const size = geom.size;
+      const isOuter = geom.rgba && geom.rgba[3] < 0.5;
+      const mesh = shadow(new THREE.Mesh(
+        new THREE.BoxGeometry(size[0] * 2, isOuter ? 0.95 : size[2] * 2, size[1] * 2),
+        materials.wall
+      ));
+      const p = simToScene(geom.pos);
+      mesh.position.set(p.x, isOuter ? 0.475 : p.y, p.z);
+      simStatic.add(mesh);
+    }
+  }
+}
+
+function interpAngle(a, b, t) {
+  let delta = b - a;
+  while (delta > Math.PI) delta -= Math.PI * 2;
+  while (delta < -Math.PI) delta += Math.PI * 2;
+  return a + delta * t;
+}
+
+function interpRecord(a, b, t) {
+  const pa = simToScene(a.pos);
+  const pb = simToScene(b.pos);
+  return {
+    x: THREE.MathUtils.lerp(pa.x, pb.x, t),
+    z: THREE.MathUtils.lerp(pa.z, pb.z, t),
+    y: THREE.MathUtils.lerp(pa.y, pb.y, t),
+    yaw: interpAngle(a.yaw || 0, b.yaw || 0, t)
+  };
+}
+
+function replayFrame(elapsed) {
+  const frames = replay.data.frames;
+  const fps = 7.5;
+  const scaled = (elapsed * fps) % Math.max(1, frames.length - 1);
+  const i = Math.floor(scaled);
+  const t = scaled - i;
+  return { a: frames[i], b: frames[Math.min(i + 1, frames.length - 1)], t };
+}
+
+function updateTurnHud(frame) {
+  const horizon = replay.data?.source?.env?.includes('hide_and_seek') ? 80 : Math.max(1, replay.data.frames.length - 1);
+  const prepSteps = Math.round(horizon * 0.4);
+  const step = frame.step || 0;
+  const isBlue = step < prepSteps;
+  const remaining = isBlue ? prepSteps - step : horizon - step;
+  phaseName.textContent = isBlue ? 'Blue build phase' : 'Red seek phase';
+  phaseStep.textContent = `${Math.max(0, remaining)} steps left`;
+}
+
+function applyReplay(elapsed) {
+  const { a, b, t } = replayFrame(elapsed);
+  const blueTurn = a.step < 32;
+  updateTurnHud(a);
+  fogWash.material.opacity = blueTurn ? 0.07 : 0.12;
+
+  for (let i = 0; i < replayAgents.length; i++) {
+    const ra = a.agents[i];
+    const rb = b.agents[i] || ra;
+    const agent = replayAgents[i];
+    if (!ra) {
+      agent.visible = false;
+      continue;
+    }
+    agent.visible = true;
+    const p = interpRecord(ra, rb, t);
+    const lookTarget = {
+      x: p.x + Math.sin(p.yaw),
+      z: p.z + Math.cos(p.yaw)
+    };
+    const active = ra.team === 'hider' ? blueTurn : !blueTurn;
+    setAgentPose(agent, p.x, p.z, active, i * 1.31, lookTarget);
+    agent.position.y = Math.max(0.02, p.y * 0.16);
+  }
+
+  for (let i = 0; i < replayBoxes.length; i++) {
+    const ra = a.boxes[i];
+    const rb = b.boxes[i] || ra;
+    const mesh = replayBoxes[i];
+    if (!ra) {
+      mesh.visible = false;
+      continue;
+    }
+    mesh.visible = true;
+    const p = interpRecord(ra, rb, t);
+    mesh.position.set(p.x, 0, p.z);
+    mesh.rotation.y = p.yaw;
+  }
+
+  for (let i = 0; i < replayRamps.length; i++) {
+    const ra = a.ramps[i];
+    const rb = b.ramps[i] || ra;
+    const mesh = replayRamps[i];
+    if (!ra) {
+      mesh.visible = false;
+      continue;
+    }
+    mesh.visible = true;
+    const p = interpRecord(ra, rb, t);
+    mesh.position.set(p.x, 0.02, p.z);
+    mesh.rotation.y = p.yaw;
+  }
+
+  lockIconA.visible = false;
+  lockIconB.visible = false;
+  movableBarrier.visible = false;
+
+  const camDrift = Math.sin(elapsed * 0.08) * 0.1;
+  camera.position.set(4.9 + camDrift, 6.8, 6.4 - camDrift * 0.5);
+  camera.lookAt(0.0, 0.05, 0.0);
+}
+
 function animate() {
   const elapsed = clock.getElapsedTime();
+  if (replay.data) {
+    applyReplay(elapsed);
+    renderer.render(scene, camera);
+    requestAnimationFrame(animate);
+    return;
+  }
+
   const cycle = (elapsed % 12) / 12;
   const blueTurn = cycle < 0.55;
   const redT = phaseBlend(cycle, 0.55, 1.0);

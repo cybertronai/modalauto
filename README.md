@@ -2,6 +2,64 @@
 
 Core orchestration code for running agentic research loops against reproducible experiment folders.
 
+## Quick Start: How to Run
+
+Follow these steps to set up the environment, initialize the team database, launch the multiagent orchestration loop, and view the live dashboard in your browser.
+
+### 1. Setup Environment
+Clone the repository and prepare the virtual environment:
+```bash
+git clone <repo-url> autoresearch
+cd autoresearch
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+```
+*(No external package dependencies are needed for the default `matmul` reference experiment as long as you use the `bin/` entrypoints.)*
+
+If you call modules directly instead of using the `bin/` entrypoints, expose the parent directory:
+```bash
+export PYTHONPATH="$(pwd)/..:${PYTHONPATH:-}"
+python -m autoresearch.backend.team_journal --experiment matmul init
+```
+
+### 2. Start the Multiagent Orchestration Run
+Initialize the team database, then launch the topline manager agent. The manager will automatically read `experiments/matmul/workflow.json`, apply the scale plan, and spawn the specialized agent team:
+```bash
+# Initialize the experiment database
+python bin/autoresearch-team --experiment matmul init
+
+# Launch the topline manager to orchestrate the run
+python bin/autoresearch-agent topline_manager --experiment matmul --agent-id manager-main --max-steps 100 --interval 5
+```
+
+All generated state stays inside the experiment folder (e.g., `experiments/matmul/journal/` for databases, artifacts, and frontend logs, and `experiments/matmul/worktrees/` for agent-local workspaces).
+
+* Note: The default experiment is `matmul`, so `--experiment matmul` can be omitted when running the reference experiment. Use `--experiment <name>` for other experiments under `experiments/`.
+
+You can view the active team status at any time with:
+```bash
+python bin/autoresearch-team --experiment matmul status
+```
+
+To clear generated run state for a fresh run (runs as a dry run unless `--yes` is passed):
+```bash
+python bin/autoresearch-clear-runs --experiment matmul
+python bin/autoresearch-clear-runs --experiment matmul --yes
+```
+
+### 3. Launch the Live Dashboard
+The frontend app streams updates in real-time as the multiagent run writes to the journal. To launch the frontend server:
+```bash
+cd frontend
+FRONTEND_JOURNAL=../experiments/matmul/journal PORT=5176 python3 scripts/serve.py
+```
+Open [http://127.0.0.1:5176/](http://127.0.0.1:5176/) in your browser. No page reload is required.
+
+*(Note: The frontend app loads React/Babel dynamically in the browser, so `npm install` is not required to view the dashboard. Install Node dependencies only when running browser tests or Playwright checks: `cd frontend && npm install && cd ..`)*
+
+---
+
 ## Layout
 
 The repository root is split by responsibility:
@@ -29,35 +87,9 @@ experiments/<experiment_name>/
 
 `journal/` and `worktrees/` are generated and ignored by Git. Track only the files needed to reproduce the experiment, usually `README.md`, `workflow.json`, source code, configs, and small fixtures.
 
-## Full Multiagent Run
+Experiment-specific environments may need their own dependencies. Keep those instructions inside `experiments/<name>/README.md` and keep generated virtualenvs, caches, journals, and worktrees out of Git.
 
-From this directory:
-
-```bash
-python bin/autoresearch-team --experiment matmul init
-python bin/autoresearch-agent topline_manager --experiment matmul --agent-id manager-main --max-steps 100 --interval 5
-python bin/autoresearch-team --experiment matmul status
-```
-
-This is the main autoresearch loop. The topline manager reads `experiments/matmul/workflow.json`, applies the scale plan, and spawns the rest of the team. All generated state stays inside the experiment folder:
-
-- `experiments/matmul/journal/`: team DB, research memory, messages, run artifacts, and frontend changelog.
-- `experiments/matmul/worktrees/`: agent-local workspaces and launcher logs.
-
-The default experiment is `matmul`, so `--experiment matmul` can be omitted when running the reference experiment.
-
-Use `--experiment <name>` for any experiment under `experiments/`, or `--experiment-root /path/to/env` for an external experiment folder.
-
-## Frontend
-
-Launch the live frontend against the active experiment journal:
-
-```bash
-cd frontend
-FRONTEND_JOURNAL=../experiments/matmul/journal PORT=5176 python3 scripts/serve.py
-```
-
-Open `http://127.0.0.1:5176/`. The app streams updates from `/api/events`; no page reload is required while a multiagent run is writing to the journal.
+---
 
 ## General-Purpose Experiment Setup
 
@@ -167,6 +199,21 @@ Expected output shape:
   "elapsed_seconds": 1.23
 }
 ```
+
+Optional branch media can be returned in the same summary. Use this when an experiment can render a small timelapse GIF/video, rollout clip, plot animation, or other visual run preview for a candidate:
+
+```json
+{
+  "media": {
+    "timelapse": {
+      "path": "timelapse.gif",
+      "label": "candidate rollout"
+    }
+  }
+}
+```
+
+`path` may be relative to the run artifact directory, relative to the experiment journal, or an absolute path inside the experiment journal. The frontend exposes it on the branch as `node.media.timelapse` and serves local files through `/api/media?node=<hypothesis_id>&kind=timelapse`.
 
 The reference matmul runner lives at `experiments/matmul/loop.py` and writes:
 
