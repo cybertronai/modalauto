@@ -20,9 +20,10 @@
   const isMaximize = (world) => String((world.meta && world.meta.direction) || 'minimize').toLowerCase() === 'maximize';
   const isMatmulDomain = (world) => String((world.meta && world.meta.domain) || '').toLowerCase().includes('matmul');
   const betterScore = (world, a, b) => isMaximize(world) ? b.score - a.score : a.score - b.score;
+  const parentOf = (node) => node && (node.displayParent || node.parent);
 
-  function lineageArr(world, nodeId) { const a = []; let c = world.nodes.find((n) => n.id === nodeId); while (c) { a.unshift(c); c = c.parent ? world.nodes.find((n) => n.id === c.parent) : null; } return a; }
-  function gen1Of(world, node) { let c = node; while (c && c.gen > 1) c = world.nodes.find((n) => n.id === c.parent); return c; }
+  function lineageArr(world, nodeId) { const a = []; let c = world.nodes.find((n) => n.id === nodeId); while (c) { a.unshift(c); const p = parentOf(c); c = p ? world.nodes.find((n) => n.id === p) : null; } return a; }
+  function gen1Of(world, node) { let c = node; while (c && c.gen > 1) { const p = parentOf(c); c = p ? world.nodes.find((n) => n.id === p) : null; } return c; }
 
   // Pick two branches that come from a COMMON tree: find the deepest fork point
   // (a node whose subtree splits into ≥2 children that each lead to an accepted
@@ -33,7 +34,7 @@
     const maximize = isMaximize(world);
     const byId = new Map(nodes.map((n) => [n.id, n]));
     const childrenOf = new Map();
-    nodes.forEach((n) => { if (n.parent && byId.has(n.parent)) { (childrenOf.get(n.parent) || childrenOf.set(n.parent, []).get(n.parent)).push(n); } });
+    nodes.forEach((n) => { const p = parentOf(n); if (p && byId.has(p)) { (childrenOf.get(p) || childrenOf.set(p, []).get(p)).push(n); } });
     const scored = (n) => n.outcome === 'accept' && n.score != null;
 
     // For each node, the best (lowest-score) accepted leaf in its subtree.
@@ -91,7 +92,7 @@
       const low = Math.min(...values);
       const high = Math.max(...values);
       return { low, high, span: Math.max(1e-9, high - low), worst: isMaximize(world) ? low : high, tMax: world.meta.tMax };
-    }, [world.meta.seed]);
+    }, [world]);
     const scoreY = (score) => {
       const sc = Math.max(dom.low, Math.min(dom.high, score));
       const rank = isMaximize(world) ? (dom.high - sc) / dom.span : (sc - dom.low) / dom.span;
@@ -111,12 +112,17 @@
       const o = {};
       world.nodes.forEach((n) => { o[n.id] = { x: pad + (n.tProposed / dom.tMax) * (W - 2 * pad), y: scoreY(ls[n.id]) }; });
       return o;
-    }, [world.meta.seed]);
-    const linA = useMemo(() => new Set(lineageArr(world, aNode).map((n) => n.id)), [world.meta.seed, aNode]);
-    const linB = useMemo(() => new Set(lineageArr(world, bNode).map((n) => n.id)), [world.meta.seed, bNode]);
-    const diverge = useMemo(() => { const arrA = lineageArr(world, aNode); let last = arrA[0]; for (const n of arrA) { if (linB.has(n.id)) last = n; else break; } return last; }, [world.meta.seed, aNode, bNode]);
+    }, [world, dom]);
+    const linA = useMemo(() => new Set(lineageArr(world, aNode).map((n) => n.id)), [world, aNode]);
+    const linB = useMemo(() => new Set(lineageArr(world, bNode).map((n) => n.id)), [world, bNode]);
+    const diverge = useMemo(() => { const arrA = lineageArr(world, aNode); let last = arrA[0] || world.nodes[0]; for (const n of arrA) { if (linB.has(n.id)) last = n; else break; } return last; }, [world, aNode, bNode]);
     const T = world.meta.tMax;
-    const edge = (a, b) => { const pa = pos[a], pb = pos[b], mx = (pa.x + pb.x) / 2; return `M${pa.x} ${pa.y} C ${mx} ${pa.y}, ${mx} ${pb.y}, ${pb.x} ${pb.y}`; };
+    const edge = (a, b) => {
+      const pa = pos[a], pb = pos[b];
+      if (!pa || !pb) return null;
+      const mx = (pa.x + pb.x) / 2;
+      return `M${pa.x} ${pa.y} C ${mx} ${pa.y}, ${mx} ${pb.y}, ${pb.x} ${pb.y}`;
+    };
 
     const onMove = (e) => { if (hover) { const r = panelRef.current.getBoundingClientRect(); setHover((h) => h && ({ ...h, mx: e.clientX - r.left, my: e.clientY - r.top })); } };
 
@@ -125,15 +131,19 @@
         <svg className="evo-svg" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet">
           {/* edges */}
           {world.nodes.map((n) => {
-            if (!n.parent) return null;
-            const inA = linA.has(n.id) && linA.has(n.parent), inB = linB.has(n.id) && linB.has(n.parent);
+            const p = parentOf(n);
+            if (!p) return null;
+            const path = edge(p, n.id);
+            if (!path) return null;
+            const inA = linA.has(n.id) && linA.has(p), inB = linB.has(n.id) && linB.has(p);
             const both = inA && inB;
             const col = both ? 'var(--ink-2)' : inA ? cA : inB ? cB : (n.score != null ? fitVar(n.fit) : (n.outcome === 'reject' ? 'var(--bad)' : 'var(--line-strong)'));
-            return <path key={'e' + n.id} d={edge(n.parent, n.id)} fill="none" stroke={col} strokeWidth={(inA || inB) ? 2.6 : 1} opacity={(inA || inB) ? 0.98 : (n.score != null ? 0.26 : 0.18)} />;
+            return <path key={'e' + n.id} d={path} fill="none" stroke={col} strokeWidth={(inA || inB) ? 2.6 : 1} opacity={(inA || inB) ? 0.98 : (n.score != null ? 0.26 : 0.18)} />;
           })}
           {/* nodes */}
           {world.nodes.map((n) => {
             const st = world.fns.statusAt(n, T); const p = pos[n.id];
+            if (!p) return null;
             const onA = linA.has(n.id), onB = linB.has(n.id); const on = onA || onB;
             let r, fill, stroke = 'none';
             if (st === 'verified') { r = 3.4 + (n.fit || 0) * 1.0; fill = fitVar(n.fit); }
@@ -178,38 +188,151 @@
   function artifactUrl(path) {
     return '/api/artifact?path=' + encodeURIComponent(path);
   }
+
+  function valueText(value) {
+    if (value == null) return '—';
+    if (typeof value === 'number') return fmt(value);
+    if (typeof value === 'boolean') return value ? 'true' : 'false';
+    if (Array.isArray(value)) return value.join(', ');
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+  }
+
+  function labelText(value) {
+    return String(value || '').replace(/_/g, ' ');
+  }
+
+  function SnapBlock({ title, children }) {
+    if (!children) return null;
+    return (
+      <div className="snap-block">
+        <div className="block-label">{title}</div>
+        {children}
+      </div>
+    );
+  }
+
+  function ArtifactMedia({ artifact }) {
+    const images = artifact && Array.isArray(artifact.images) ? artifact.images : [];
+    const videos = artifact && Array.isArray(artifact.videos) ? artifact.videos : [];
+    if (!images.length && !videos.length) return null;
+    const solo = images.length + videos.length === 1;
+    return (
+      <div className={'artifact-media' + (solo ? ' solo' : '')}>
+        {videos.map((file) => <video key={file.path} src={artifactUrl(file.path)} controls muted loop playsInline />)}
+        {images.map((file) => <a key={file.path} href={artifactUrl(file.path)} target="_blank" rel="noreferrer">
+          <img src={artifactUrl(file.path)} alt={file.name} />
+        </a>)}
+      </div>
+    );
+  }
+
   function VoxelMini({ artifact }) {
     const body = artifact && artifact.body;
     const grid = body && Array.isArray(body.grid) ? body.grid : null;
     if (!grid || !grid.length) return null;
     const cols = Math.max(1, ...grid.map((row) => Array.isArray(row) ? row.length : 0));
+    const legend = body.legend || {};
     return (
-      <div className="voxel-grid snap-voxel" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
-        {grid.flatMap((row, y) => row.map((cell, x) => <span key={y + ':' + x} className={'voxel v' + cell} />))}
-      </div>
-    );
-  }
-  function ArtifactSummary({ node }) {
-    const artifact = node && node.artifact ? node.artifact.details : null;
-    const metrics = Object.entries((artifact && artifact.metrics) || {}).filter(([, v]) => v != null).slice(0, 8);
-    const files = artifact && Array.isArray(artifact.files) ? artifact.files : [];
-    return (
-      <div className="artifact-view snap-artifacts">
-        <VoxelMini artifact={artifact} />
-        {metrics.length ? <div className="artifact-metrics">
-          {metrics.map(([k, v]) => <div key={k} className="prow"><span className="pk">{k.replace(/_/g, ' ')}</span><span className="pv">{Array.isArray(v) ? v.join(', ') : fmt(v)}</span></div>)}
-        </div> : null}
-        {files.length ? <div className="artifact-files">
-          {files.slice(0, 5).map((file) => <a key={file.path} className="artifact-file" href={artifactUrl(file.path)} target="_blank" rel="noreferrer">
-            <span className="artifact-kind">{file.kind}</span><span className="artifact-name">{file.name}</span>
-          </a>)}
+      <div className="snap-voxel-wrap">
+        <div className="voxel-grid snap-voxel" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+          {grid.flatMap((row, y) => row.map((cell, x) => (
+            <span key={y + ':' + x} className={'voxel v' + cell} title={(legend[String(cell)] || cell) + ' · ' + x + ',' + y} />
+          )))}
+        </div>
+        {Object.keys(legend).length ? <div className="voxel-legend">
+          {Object.entries(legend).map(([k, v]) => (
+            <span key={k} className="voxel-legend-item"><span className={'voxel-swatch v' + k} />{v}</span>
+          ))}
         </div> : null}
       </div>
     );
   }
 
+  function RunRecord({ node }) {
+    const rows = [
+      ['submission', node.subId],
+      ['verification', node.verId],
+      ['decision', node.outcome],
+      ['semantic', node.semantic],
+      ['proposer', node.proposerRole || node.proposer],
+      ['implementor', node.impl],
+      ['verifier', node.verifier],
+      ['proposed', node.tProposed == null ? null : mmss(node.tProposed)],
+      ['claimed', node.tClaimed == null ? null : mmss(node.tClaimed)],
+      ['submitted', node.tSubmitted == null ? null : mmss(node.tSubmitted)],
+      ['verified', node.tVerified == null ? null : mmss(node.tVerified)],
+    ].filter(([, v]) => v != null && v !== '');
+    if (!rows.length) return null;
+    return (
+      <div className="snap-record">
+        {rows.map(([k, v]) => <div key={k} className="prow"><span className="pk">{k}</span><span className="pv">{valueText(v)}</span></div>)}
+      </div>
+    );
+  }
+
+  function ArtifactMetrics({ artifact }) {
+    const entries = Object.entries((artifact && artifact.metrics) || {}).filter(([, v]) => v != null);
+    if (!entries.length) return null;
+    return (
+      <div className="artifact-metrics">
+        {entries.map(([k, v]) => <div key={k} className="prow"><span className="pk">{labelText(k)}</span><span className="pv">{valueText(v)}</span></div>)}
+      </div>
+    );
+  }
+
+  function ArtifactFiles({ artifact }) {
+    const files = artifact && Array.isArray(artifact.files) ? artifact.files : [];
+    if (!files.length) return null;
+    return (
+      <div className="artifact-files">
+        {files.map((file) => <a key={file.path} className="artifact-file" href={artifactUrl(file.path)} target="_blank" rel="noreferrer">
+          <span className="artifact-kind">{file.kind}</span>
+          <span className="artifact-name">{file.name}</span>
+          {file.size != null ? <span className="artifact-size">{fmt(file.size) + ' B'}</span> : null}
+        </a>)}
+      </div>
+    );
+  }
+
+  function CustomVisualizations({ node, world, speed }) {
+    const known = new Set(['matmul_ir', 'matmul_playback', 'voxel_grid', 'metrics', 'media', 'artifact_media', 'rollout_media', 'artifact_files', 'artifact_bundle']);
+    const views = ((world.meta && world.meta.visualizations) || []).filter((view) => view && !known.has(view.type));
+    const registry = window.AutoresearchVisualizations || {};
+    return views.map((view) => {
+      const Comp = registry[view.type] || (view.component ? window[view.component] : null);
+      if (!Comp) return null;
+      return <SnapBlock key={view.type} title={view.label || labelText(view.type)}>
+        <Comp node={node} view={view} app={world} speed={speed} artifactUrl={artifactUrl} fmt={fmt} />
+      </SnapBlock>;
+    });
+  }
+
+  function ArtifactSummary({ node, world, speed }) {
+    const artifact = node && node.artifact ? node.artifact.details : null;
+    if (!artifact) {
+      return <div className="artifact-view snap-artifacts"><div className="snap-empty">No artifact recorded for this candidate.</div></div>;
+    }
+    const hasMedia = (artifact.images && artifact.images.length) || (artifact.videos && artifact.videos.length);
+    const hasBody = artifact.body && Array.isArray(artifact.body.grid) && artifact.body.grid.length;
+    const hasMetrics = artifact.metrics && Object.values(artifact.metrics).some((v) => v != null);
+    const hasFiles = artifact.files && artifact.files.length;
+    return (
+      <div className="artifact-view snap-artifacts">
+        {hasMedia ? <SnapBlock title="rollout"><ArtifactMedia artifact={artifact} /></SnapBlock> : null}
+        {hasBody ? <SnapBlock title="body"><VoxelMini artifact={artifact} /></SnapBlock> : null}
+        {hasMetrics ? <SnapBlock title="evaluation"><ArtifactMetrics artifact={artifact} /></SnapBlock> : null}
+        <SnapBlock title="run record"><RunRecord node={node} /></SnapBlock>
+        <CustomVisualizations node={node} world={world} speed={speed} />
+        {hasFiles ? <SnapBlock title="artifacts"><ArtifactFiles artifact={artifact} /></SnapBlock> : null}
+        {artifact.preview ? <SnapBlock title="preview"><pre className="artifact-preview">{artifact.preview}</pre></SnapBlock> : null}
+      </div>
+    );
+  }
+
   function RunSnapshot({ label, color, node, world, speed }) {
-    const parent = node.parent ? world.nodes.find((n) => n.id === node.parent) : null;
+    const p = parentOf(node);
+    const parent = p ? world.nodes.find((n) => n.id === p) : null;
     const d = parent && parent.score != null && node.score != null ? node.score - parent.score : null;
     const deltaGood = d == null ? false : isMaximize(world) ? d > 0 : d < 0;
     const deltaBad = d == null ? false : isMaximize(world) ? d < 0 : d > 0;
@@ -232,7 +355,8 @@
           <div className="snap-m"><span className="snap-mk">Δ step</span><span className="snap-mv mono" style={{ color: d == null ? 'var(--ink-3)' : deltaGood ? 'var(--ok)' : deltaBad ? 'var(--bad)' : 'var(--ink-3)' }}>{d == null ? '—' : (d < 0 ? '▼ ' : '▲ ') + fmt(Math.abs(d))}</span></div>
           <div className="snap-m"><span className="snap-mk">family</span><span className="snap-mv mono">{node.family}</span></div>
         </div>
-        {showMatmul ? <div className="snap-run-wrap"><RunPlayback node={node} speed={speed} key={node.id} /></div> : <ArtifactSummary node={node} />}
+        {showMatmul ? <div className="snap-run-wrap"><RunPlayback node={node} speed={speed} key={node.id} /></div> : null}
+        <ArtifactSummary node={node} world={world} speed={speed} />
         {/* Real submitted code when available (from the journal artifact); fall
             back to a representative IR only for mock/codeless nodes. */}
         {showMatmul && node.code ? (

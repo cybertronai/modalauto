@@ -14,7 +14,7 @@ from export_real_data import build_payload, detect_db, render_js, render_runs_js
 
 
 AUTORESEARCH_ROOT = Path(__file__).resolve().parents[2]
-REPO_ROOT = AUTORESEARCH_ROOT.parent
+REPO_ROOT = AUTORESEARCH_ROOT
 DEFAULT_AUTORESEARCH = AUTORESEARCH_ROOT
 CHANGELOG_NAME = "frontend_changelog.jsonl"
 WATCH_TABLES = ["agents", "hypotheses", "submissions", "verifications", "manager_events"]

@@ -19,7 +19,7 @@ from typing import Any
 from autoresearch.backend import experiment_config
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB = experiment_config.DEFAULT_TEAM_DB
 DEFAULT_WORKTREE_ROOT = experiment_config.DEFAULT_WORKTREE_ROOT
 LEASE_SECONDS = 900

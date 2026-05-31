@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 AUTORESEARCH_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = AUTORESEARCH_ROOT.parent
+REPO_ROOT = AUTORESEARCH_ROOT
 EXPERIMENTS_ROOT = AUTORESEARCH_ROOT / "experiments"
 DEFAULT_EXPERIMENT = "matmul"
 

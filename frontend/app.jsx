@@ -285,6 +285,11 @@
         setSelected((id) => id && next.nodes.some((n) => n.id === id) ? id : null);
         setBranchSelection((ids) => ids.filter((id) => next.nodes.some((n) => n.id === id)).slice(-2));
       };
+      if (window.__AUTORESEARCH_PENDING_PAYLOAD) {
+        const pending = window.__AUTORESEARCH_PENDING_PAYLOAD;
+        delete window.__AUTORESEARCH_PENDING_PAYLOAD;
+        window.__AUTORESEARCH_APPLY_PAYLOAD(pending);
+      }
       return () => { delete window.__AUTORESEARCH_APPLY_PAYLOAD; };
     }, []);
 

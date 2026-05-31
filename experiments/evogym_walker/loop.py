@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import sys
 import time
@@ -24,7 +25,7 @@ warnings.filterwarnings("ignore")
 import numpy as np
 
 # Make `autoresearch` importable when this module is run as a script
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from autoresearch.backend import experiment_config, team_journal
 from autoresearch.experiments.evogym_walker.walker import scorer as evo_scorer
@@ -38,7 +39,7 @@ from autoresearch.experiments.evogym_walker.walker.candidates import Candidate
 SCORE_SCALE = 10000
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_LAYOUT = experiment_config.layout("evogym_walker")
 JOURNAL_ROOT = DEFAULT_LAYOUT.journal_dir
 
@@ -182,6 +183,8 @@ def write_run(
 ) -> Path:
     artifact_dir = journal_root / "artifacts" / run_id
     artifact_dir.mkdir(parents=True, exist_ok=True)
+    bodies_dir = artifact_dir / "bodies"
+    bodies_dir.mkdir(parents=True, exist_ok=True)
 
     # CSV
     csv_path = artifact_dir / "candidates.csv"
@@ -195,6 +198,9 @@ def write_run(
             d = r.__dict__.copy()
             d["score"] = "" if d["score"] is None else f"{d['score']:.6f}"
             writer.writerow(d)
+
+    for c in cands:
+        np.save(bodies_dir / f"{c.name}.npy", c.body)
 
     # Best body
     valid = [(r, c) for r, c in zip(rows, cands) if r.semantic == "ok"]
@@ -320,8 +326,6 @@ def write_journal(
 
         sub_id = team_journal.next_id(db, "sub", "submissions")
         body_path = artifact_dir / f"bodies/{c.name}.npy"
-        body_path.parent.mkdir(parents=True, exist_ok=True)
-        np.save(body_path, c.body)
         summary = {
             "name": c.name,
             "family": c.family,
@@ -383,7 +387,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seeds", default="42,43,44",
                         help="Comma-sep seeds for multi-seed scoring")
     parser.add_argument("--rollout-steps", type=int, default=80)
-    parser.add_argument("--seed", type=int, default=42, help="seed for candidate gen")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="seed for candidate gen; defaults to a stable hash of run id + hypothesis")
     parser.add_argument("--journal-root", type=Path, default=JOURNAL_ROOT)
     parser.add_argument("--experiment-root", type=Path, default=None,
                         help="override experiment root (workflow.json passes this)")
@@ -393,6 +398,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="extra mutated children of the random batch's first candidate")
     parser.add_argument("--no-rollout-artifacts", action="store_true",
                         help="skip rendered rollout GIF artifacts")
+    parser.add_argument("--no-journal", action="store_true",
+                        help="write artifacts only; let autoresearch-agent record journal rows")
     args = parser.parse_args(argv)
 
     # Honor workflow.json --experiment-root substitution
@@ -404,6 +411,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.hypothesis_json is not None and args.hypothesis_json.exists():
         hypothesis_record = json.loads(args.hypothesis_json.read_text())
         print(f"[hyp] {hypothesis_record.get('title', '(untitled)')}", file=sys.stderr)
+
+    if args.seed is None:
+        seed_material = json.dumps(
+            {"run_id": args.run_id, "hypothesis": hypothesis_record},
+            sort_keys=True,
+            default=str,
+        )
+        args.seed = int(hashlib.sha256(seed_material.encode("utf-8")).hexdigest()[:8], 16)
 
     seeds = [int(s) for s in args.seeds.split(",")]
     rng = np.random.default_rng(args.seed)
@@ -419,10 +434,11 @@ def main(argv: list[str] | None = None) -> int:
                               args.journal_root.expanduser().resolve(),
                               seeds, args.rollout_steps,
                               render_rollouts=not args.no_rollout_artifacts)
-    write_journal(args.run_id, rows, cands,
-                  args.journal_root.expanduser().resolve(),
-                  artifact_dir, seeds, args.rollout_steps,
-                  hypothesis_record=hypothesis_record)
+    if not args.no_journal:
+        write_journal(args.run_id, rows, cands,
+                      args.journal_root.expanduser().resolve(),
+                      artifact_dir, seeds, args.rollout_steps,
+                      hypothesis_record=hypothesis_record)
 
     valid = sorted([r for r in rows if r.semantic == "ok"], key=lambda r: -r.score)
     out = {

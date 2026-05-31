@@ -77,22 +77,38 @@ def fresh_id(prefix: str) -> str:
     return f"{prefix}-{uuid4().hex[:12]}"
 
 
+def workflow_config(args: argparse.Namespace) -> dict:
+    return experiment_config.load_workflow(args.workflow_path)
+
+
+def workflow_domain(workflow: dict) -> str:
+    return str(workflow.get("domain") or "").lower()
+
+
+def workflow_maximize(args: argparse.Namespace) -> bool:
+    workflow = workflow_config(args)
+    return str(workflow.get("direction") or "").lower() == "maximize"
+
+
+def workflow_python(workflow: dict) -> str:
+    venv = workflow.get("venv")
+    if venv:
+        exe = Path(str(venv)).expanduser() / "bin" / "python"
+        if exe.exists():
+            return str(exe)
+    return sys.executable
+
+
 def runner_command(args: argparse.Namespace, run_id: str, hyp_path: Path) -> list[str]:
-    workflow = experiment_config.load_workflow(args.workflow_path)
+    workflow = workflow_config(args)
     runner = workflow.get("runner", {}) if isinstance(workflow, dict) else {}
     command = runner.get("command") or "experiments/matmul/loop.py"
     command_path = Path(command)
     if not command_path.is_absolute():
         command_path = REPO_ROOT / command_path
-    python_executable = sys.executable
-    venv = workflow.get("venv") if isinstance(workflow, dict) else None
-    if venv:
-        candidate = Path(str(venv)).expanduser() / "bin" / "python"
-        if candidate.exists():
-            python_executable = str(candidate)
     base_args = experiment_config.render_workflow_args(runner.get("args", []), args.experiment_layout)
-    return [
-        python_executable,
+    cmd = [
+        workflow_python(workflow),
         str(command_path),
         *base_args,
         "--run-id",
@@ -101,11 +117,14 @@ def runner_command(args: argparse.Namespace, run_id: str, hyp_path: Path) -> lis
         str(hyp_path),
         "--journal-root",
         str(args.journal_root),
-        "--verify-cases",
-        "4",
-        "--verify-top",
-        "3",
     ]
+    if workflow_domain(workflow) == "matmul":
+        cmd.extend(["--verify-cases", "4", "--verify-top", "3"])
+    return cmd
+
+
+def best_frontier_for_args(args: argparse.Namespace, db) -> dict:
+    return team_journal.best_frontier(db, maximize=workflow_maximize(args))
 
 
 def connect_team(args: argparse.Namespace):
@@ -333,9 +352,24 @@ def parse_json_object(raw: str | None) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def successful_donors(db, limit: int = 12) -> list[dict]:
+def parse_runner_result(raw: str) -> dict:
+    decoder = json.JSONDecoder()
+    for idx, ch in enumerate(raw):
+        if ch != "{":
+            continue
+        try:
+            value, _end = decoder.raw_decode(raw[idx:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise ValueError("runner stdout did not contain a JSON object")
+
+
+def successful_donors(db, limit: int = 12, maximize: bool = False) -> list[dict]:
+    direction = "DESC" if maximize else "ASC"
     rows = db.execute(
-        """
+        f"""
         SELECT h.id AS hypothesis_id, h.title, h.context_json,
                s.id AS submission_id, s.candidate_summary_json,
                v.official_score
@@ -343,7 +377,7 @@ def successful_donors(db, limit: int = 12) -> list[dict]:
         JOIN submissions s ON s.id = v.submission_id
         JOIN hypotheses h ON h.id = s.hypothesis_id
         WHERE v.decision = 'accept' AND v.official_score IS NOT NULL
-        ORDER BY v.official_score ASC, v.created_at DESC
+        ORDER BY v.official_score {direction}, v.created_at DESC
         LIMIT ?
         """,
         (limit,),
@@ -426,7 +460,7 @@ def transfer_payload(parent_hypothesis_id: str | None, donors: list[dict], domin
 def propose_hypothesis(args: argparse.Namespace, radical: bool = False) -> dict[str, str]:
     db = connect_team(args)
     existing = db.execute("SELECT COUNT(*) AS n FROM hypotheses").fetchone()["n"]
-    best = team_journal.best_frontier(db)
+    best = best_frontier_for_args(args, db)
     parent_hypothesis_id = usable_frontier_parent(db, best) if existing else None
     if radical and args.allow_seeded_strategies:
         templates = [
@@ -563,7 +597,8 @@ def run_global_searcher_step(args: argparse.Namespace) -> None:
 def run_insight_generator_step(args: argparse.Namespace) -> None:
     heartbeat(args, "working")
     db = connect_team(args)
-    best = team_journal.best_frontier(db)
+    maximize = workflow_maximize(args)
+    best = team_journal.best_frontier(db, maximize=maximize)
     parent_hypothesis_id = usable_frontier_parent(db, best)
     recent = db.execute(
         """
@@ -593,7 +628,7 @@ def run_insight_generator_step(args: argparse.Namespace) -> None:
         "insight": "If many recent submissions share the same family/score, force broader loop-order and address-layout reasoning before more implementation.",
         "best_frontier": best,
         "recent_families": families,
-        "recent_best": min(scores) if scores else None,
+        "recent_best": (max(scores) if maximize else min(scores)) if scores else None,
     }
     db.execute(
         """
@@ -925,7 +960,8 @@ def retire_duplicate_tools(db, signature: str, keep_tool_id: str | None = None) 
 def run_meta_agent_step(args: argparse.Namespace) -> None:
     heartbeat(args, "working")
     db = connect_team(args)
-    best = team_journal.best_frontier(db)
+    maximize = workflow_maximize(args)
+    best = team_journal.best_frontier(db, maximize=maximize)
     parent_hypothesis_id = usable_frontier_parent(db, best)
     recent = db.execute(
         """
@@ -955,8 +991,8 @@ def run_meta_agent_step(args: argparse.Namespace) -> None:
             invalid += 1
 
     state = team_journal.counts(db)
-    best_score = int(best.get("official_score") or min(scores or [0]) or 0)
-    recent_best = min(scores) if scores else None
+    best_score = int(best.get("official_score") or ((max(scores) if maximize else min(scores)) if scores else 0) or 0)
+    recent_best = (max(scores) if maximize else min(scores)) if scores else None
     dominant_family, dominant_count = max(families.items(), key=lambda item: item[1], default=("none", 0))
     plateau = bool(scores) and recent_best == best_score and dominant_count >= max(5, len(recent) // 2)
     pending_verification = int(state.get("submissions", {}).get("pending_verification", 0))
@@ -1100,7 +1136,7 @@ def run_meta_agent_step(args: argparse.Namespace) -> None:
             ),
         )
     transfer_hyp_id = None
-    transfer = transfer_payload(parent_hypothesis_id, successful_donors(db), dominant_family) if plateau else None
+    transfer = transfer_payload(parent_hypothesis_id, successful_donors(db, maximize=maximize), dominant_family) if plateau else None
     if transfer:
         transfer_hyp_id = fresh_id("hyp")
         donor_id = transfer["evolution"]["donor_hypothesis_id"]
@@ -1233,6 +1269,8 @@ def run_implementor_step(args: argparse.Namespace) -> None:
     else:
         hyp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     cmd = runner_command(args, run_id, hyp_path)
+    workflow = workflow_config(args)
+    domain = workflow_domain(workflow)
     prior_candidates = []
     db = connect_team(args)
     for row in db.execute("SELECT candidate_summary_json FROM submissions ORDER BY created_at DESC LIMIT 200"):
@@ -1245,8 +1283,9 @@ def run_implementor_step(args: argparse.Namespace) -> None:
             prior_candidates.append(str(name))
     db.close()
     if prior_candidates:
-        cmd.extend(["--avoid-candidates-json", json.dumps(sorted(set(prior_candidates)))])
-    if args.disable_meta_operator:
+        if domain == "matmul":
+            cmd.extend(["--avoid-candidates-json", json.dumps(sorted(set(prior_candidates)))])
+    if args.disable_meta_operator and domain == "matmul":
         cmd.append("--disable-meta-operator")
     proc = subprocess.run(cmd, cwd=str(REPO_ROOT), text=True, capture_output=True, timeout=args.step_timeout)
     worktree = Path(hyp.get("worktree_path") or args.worktree_root / args.agent_id)
@@ -1266,11 +1305,13 @@ def run_implementor_step(args: argparse.Namespace) -> None:
         db.close()
         post(args.board, args.agent_id, "global", "implementor_failed", proc.stderr[-1000:], {"hypothesis_id": hyp["id"]})
         return
-    result = json.loads(proc.stdout)
+    result = parse_runner_result(proc.stdout)
     artifact_dir = Path(result["artifact_dir"])
-    best_ir = artifact_dir / "best.ir"
     summary_path = artifact_dir / "summary.json"
-    summary = json.loads(summary_path.read_text())
+    summary = json.loads(summary_path.read_text()) if summary_path.exists() else dict(result)
+    if "best" not in summary and isinstance(result.get("best"), dict):
+        summary["best"] = result["best"]
+    artifact_path = submission_artifact_path(artifact_dir, summary, workflow)
     db = connect_team(args)
     stamp = team_journal.now()
     sub_id = fresh_id("sub")
@@ -1286,7 +1327,7 @@ def run_implementor_step(args: argparse.Namespace) -> None:
             hyp["id"],
             hyp["team_id"],
             args.agent_id,
-            str(best_ir),
+            str(artifact_path),
             json.dumps(summary, sort_keys=True),
             stamp,
             stamp,
@@ -1304,7 +1345,7 @@ def run_implementor_step(args: argparse.Namespace) -> None:
         "submission_id": sub_id,
         "score": summary.get("best", {}).get("score"),
         "strategy": strategy,
-        "artifact_path": str(best_ir),
+        "artifact_path": str(artifact_path),
     })
 
 
@@ -1339,6 +1380,56 @@ def claim_submission(args: argparse.Namespace):
     return dict(row)
 
 
+def submission_artifact_path(artifact_dir: Path, summary: dict, workflow: dict) -> Path:
+    domain = workflow_domain(workflow)
+    best = summary.get("best") if isinstance(summary.get("best"), dict) else {}
+    if domain == "evogym":
+        name = best.get("name")
+        if name:
+            body_path = artifact_dir / "bodies" / f"{name}.npy"
+            if body_path.exists():
+                return body_path
+        best_body = artifact_dir / "best.npy"
+        if best_body.exists():
+            return best_body
+    for name in ["best.ir", "best.npy", "best.json", "summary.json"]:
+        path = artifact_dir / name
+        if path.exists():
+            return path
+    raise FileNotFoundError(f"no submission artifact found in {artifact_dir}")
+
+
+def verify_evogym_submission(path: Path, summary: dict) -> tuple[str, int | None, str, str]:
+    from autoresearch.experiments.evogym_walker.walker import scorer as evo_scorer
+
+    body = evo_scorer.load_body(path)
+    seeds = summary.get("seeds")
+    if not isinstance(seeds, list) or not seeds:
+        seeds = [42, 43, 44]
+    seed_list = [int(s) for s in seeds]
+    rollout_steps = int(summary.get("rollout_steps") or 80)
+    result = evo_scorer.score_body(body, rollout_steps=rollout_steps, seeds=seed_list)
+    if result["semantic"] != "ok":
+        return "invalid", None, "{}", str(result.get("error") or "invalid")
+    buckets = dict(result.get("buckets") or {})
+    score_float = float(result["official_score"])
+    payload = {
+        "score_float": score_float,
+        "score_std": buckets.get("std"),
+        "score_min": buckets.get("min"),
+        "score_max": buckets.get("max"),
+        "score_scale": 10000,
+        "n_voxels": buckets.get("n_voxels"),
+        "n_h_actuators": buckets.get("n_h_actuators"),
+        "n_v_actuators": buckets.get("n_v_actuators"),
+        "stochastic": True,
+        "seeds": seed_list,
+        "rollout_steps": rollout_steps,
+    }
+    official_score = int(round(score_float * 10000))
+    return "ok", official_score, json.dumps(payload, sort_keys=True), ""
+
+
 def run_verifier_step(args: argparse.Namespace) -> None:
     sub = claim_submission(args)
     if sub is None:
@@ -1349,14 +1440,19 @@ def run_verifier_step(args: argparse.Namespace) -> None:
     score = None
     error = ""
     bucket_json = "{}"
+    workflow = workflow_config(args)
+    summary = parse_json_object(sub["candidate_summary_json"])
     try:
-        ir = path.read_text()
-        ok, message = verify_general(ir, cases=8, seed=20260530)
-        if not ok:
-            raise ValueError(message)
-        score = matmul.score_16x16(ir)
-        semantic = "ok"
-        bucket_json = json.dumps(buckets(ir), sort_keys=True)
+        if workflow_domain(workflow) == "evogym":
+            semantic, score, bucket_json, error = verify_evogym_submission(path, summary)
+        else:
+            ir = path.read_text()
+            ok, message = verify_general(ir, cases=8, seed=20260530)
+            if not ok:
+                raise ValueError(message)
+            score = matmul.score_16x16(ir)
+            semantic = "ok"
+            bucket_json = json.dumps(buckets(ir), sort_keys=True)
     except Exception as exc:  # noqa: BLE001
         error = str(exc)
     db = connect_team(args)
@@ -1499,7 +1595,7 @@ def run_manager_step(args: argparse.Namespace) -> None:
     stale = team_journal.requeue_stale(db, args.stale_seconds)
     team_journal.cleanup_scale_action_locks(db)
     state = team_journal.counts(db)
-    state["best_frontier"] = team_journal.best_frontier(db)
+    state["best_frontier"] = team_journal.best_frontier(db, maximize=workflow_maximize(args))
     plan = team_journal.scale_plan(state, allow_idle_retire=args.allow_idle_retire)
     peer_counts = recent_peer_intent_counts(args, window_seconds=args.intent_window_seconds)
     intended_actions = subtract_peer_intents(plan["actions"], peer_counts)

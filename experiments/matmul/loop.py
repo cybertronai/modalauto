@@ -21,14 +21,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from autoresearch.backend import experiment_config
 from autoresearch.experiments.matmul.matmul import matmul
 
 
 N = 16
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 JOURNAL_ROOT = experiment_config.DEFAULT_JOURNAL_DIR
 
 

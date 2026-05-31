@@ -27,7 +27,8 @@
     "command": "experiments/evogym_walker/loop.py",
     "args": [
       "--experiment-root",
-      "{experiment_root}"
+      "{experiment_root}",
+      "--no-journal"
     ]
   },
   "paths": {

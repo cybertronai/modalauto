@@ -11,11 +11,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+AUTORESEARCH_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = AUTORESEARCH_ROOT
+if str(AUTORESEARCH_ROOT) not in sys.path:
+    sys.path.insert(0, str(AUTORESEARCH_ROOT))
+
 from autoresearch.backend import experiment_config
 
 
-AUTORESEARCH_ROOT = Path(__file__).resolve().parents[1]
-REPO_ROOT = AUTORESEARCH_ROOT.parent
 FRONTEND_SCRIPTS = AUTORESEARCH_ROOT / "frontend" / "scripts"
 if str(FRONTEND_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(FRONTEND_SCRIPTS))

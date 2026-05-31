@@ -3,27 +3,9 @@
 (function () {
   const { useState, useRef, useEffect, useMemo, useCallback } = React;
   let E = window.APP;
-  window.addEventListener('autoresearch-world', () => { E = window.APP; });
+  window.addEventListener('autoresearch-world', (event) => { E = event.detail || window.APP; });
 
   const VW = 2200, VH = 860, PAD = 70;
-  const IS_MAX = String(E.meta.direction || 'minimize').toLowerCase() === 'maximize';
-  const scoreValues = E.nodes
-    .map((n) => n.score)
-    .concat([E.meta.baseline, E.meta.best, E.meta.target])
-    .filter((v) => typeof v === 'number' && Number.isFinite(v));
-  if (!scoreValues.length) scoreValues.push(0, 1);
-  const SLOW = Math.min(...scoreValues);
-  const SHIGH = Math.max(...scoreValues);
-  const SCORE_SPAN = Math.max(1e-9, SHIGH - SLOW);
-  const WORST_SCORE = IS_MAX ? SLOW : SHIGH;
-  const BEST_SCORE = IS_MAX ? SHIGH : SLOW;
-  const clampScore = (score) => Math.max(SLOW, Math.min(SHIGH, score));
-  const scoreY = (score) => {
-    const sc = clampScore(score);
-    const rank = IS_MAX ? (SHIGH - sc) / SCORE_SPAN : (sc - SLOW) / SCORE_SPAN;
-    return PAD + rank * (VH - 2 * PAD);
-  };
-  const scoreNudge = (amount) => (IS_MAX ? -amount : amount);
   const fmtScore = (n) => {
     if (n == null) return '—';
     if (!Number.isFinite(n)) return String(n);
@@ -33,21 +15,42 @@
   };
   const ROLE_LANES = ['topline_manager', 'meta_agent', 'insight_generator', 'creative_explorer', 'global_searcher', 'implementor', 'verifier', 'researcher'];
   const mmss = (t) => String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(Math.round(t % 60)).padStart(2, '0');
-  const hasRealLineage = E.nodes.some((n) => n.parent);
-  const parentFanout = {};
-  const parentOf = (n) => n.displayParent || n.parent;
-  E.nodes.forEach((n) => { const p = parentOf(n); if (p) parentFanout[p] = (parentFanout[p] || 0) + 1; });
-  const maxParentFanout = Math.max(0, ...Object.values(parentFanout));
-  const maxNodeGen = Math.max(0, ...E.nodes.map((n) => n.gen || 0));
-  const scoreVariety = new Set(E.nodes.filter((n) => n.score != null).map((n) => n.score)).size;
-  const useTreeLayout = hasRealLineage;
-  const useBranchLaneLayout = useTreeLayout && !(maxNodeGen <= 2 && maxParentFanout > E.nodes.length * 0.35);
-  const useLaneLayout = !hasRealLineage && scoreVariety <= 3;
   function hash01(s) {
     let h = 2166136261;
     for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
     return ((h >>> 0) % 10000) / 10000;
   }
+
+  function buildTreeLayout(world) {
+    const E = world || { meta: {}, nodes: [] };
+    const IS_MAX = String(E.meta.direction || 'minimize').toLowerCase() === 'maximize';
+    const scoreValues = E.nodes
+      .map((n) => n.score)
+      .concat([E.meta.baseline, E.meta.best, E.meta.target])
+      .filter((v) => typeof v === 'number' && Number.isFinite(v));
+    if (!scoreValues.length) scoreValues.push(0, 1);
+    const SLOW = Math.min(...scoreValues);
+    const SHIGH = Math.max(...scoreValues);
+    const SCORE_SPAN = Math.max(1e-9, SHIGH - SLOW);
+    const WORST_SCORE = IS_MAX ? SLOW : SHIGH;
+    const BEST_SCORE = IS_MAX ? SHIGH : SLOW;
+    const clampScore = (score) => Math.max(SLOW, Math.min(SHIGH, score));
+    const scoreY = (score) => {
+      const sc = clampScore(score);
+      const rank = IS_MAX ? (SHIGH - sc) / SCORE_SPAN : (sc - SLOW) / SCORE_SPAN;
+      return PAD + rank * (VH - 2 * PAD);
+    };
+    const scoreNudge = (amount) => (IS_MAX ? -amount : amount);
+    const hasRealLineage = E.nodes.some((n) => n.parent);
+    const parentFanout = {};
+    const parentOf = (n) => n.displayParent || n.parent;
+    E.nodes.forEach((n) => { const p = parentOf(n); if (p) parentFanout[p] = (parentFanout[p] || 0) + 1; });
+    const maxParentFanout = Math.max(0, ...Object.values(parentFanout));
+    const maxNodeGen = Math.max(0, ...E.nodes.map((n) => n.gen || 0));
+    const scoreVariety = new Set(E.nodes.filter((n) => n.score != null).map((n) => n.score)).size;
+    const useTreeLayout = hasRealLineage;
+    const useBranchLaneLayout = useTreeLayout && !(maxNodeGen <= 2 && maxParentFanout > E.nodes.length * 0.35);
+    const useLaneLayout = !hasRealLineage && scoreVariety <= 3;
 
   // stable layout (independent of scrub time)
   const LAYOUT = (() => {
@@ -151,6 +154,8 @@
     });
     return { pos, ls, tMin, tSpan };
   })();
+    return { LAYOUT, parentOf, IS_MAX, WORST_SCORE, BEST_SCORE, useBranchLaneLayout, useLaneLayout };
+  }
 
   const fitVar = (f) => `var(--fit-${f})`;
 
@@ -169,6 +174,10 @@
   }
 
   function EvoTree({ T, selected, onSelect, density, scoreLabels, dimOffLineage }) {
+    const world = window.APP || E;
+    E = world;
+    const tree = useMemo(() => buildTreeLayout(world), [world]);
+    const { LAYOUT, parentOf, IS_MAX, WORST_SCORE, BEST_SCORE, useBranchLaneLayout, useLaneLayout } = tree;
     const wrapRef = useRef(null);
     const [view, setView] = useState({ k: 1, tx: 0, ty: 0, ready: false });
     const drag = useRef(null);
@@ -231,7 +240,7 @@
         .filter((edge) => edge.donor && edge.to && set.has(edge.donor) && set.has(edge.to))
         .map((edge) => [edge.donor, edge.to, edge]);
       return { vis, edges, transferEdges };
-    }, [T]);
+    }, [T, world]);
 
     const selNode = selected ? E.nodes.find((n) => n.id === selected) : null;
     // lineage path for highlight
@@ -243,7 +252,7 @@
         cur = p ? E.nodes.find((n) => n.id === p) : null;
       }
       return ids;
-    }, [selected]);
+    }, [selected, world]);
 
     const P = LAYOUT.pos;
     const timeTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => {
@@ -260,7 +269,7 @@
         if (n.isFrontier || i === 0 || i === sorted.length - 1 || i % Math.max(2, Math.ceil(sorted.length / 8)) === 0) out.add(n.id);
       });
       return out;
-    }, []);
+    }, [world, IS_MAX]);
     function edgePath(a, b) {
       const pa = P[a], pb = P[b];
       const dx = Math.max(28, pb.x - pa.x);
@@ -430,5 +439,5 @@
   }
 
   window.EvoTree = EvoTree;
-  window.TREE_LAYOUT = LAYOUT;
+  window.TREE_LAYOUT = () => buildTreeLayout(window.APP || E).LAYOUT;
 })();
