@@ -4,25 +4,6 @@ Core orchestration code for running agentic research loops against reproducible 
 
 ## Quick Start: How to Run
 
-### 1. Setup Environment
-Clone the repository and prepare the virtual environment:
-```bash
-git clone <repo-url> autoresearch
-cd autoresearch
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-```
-*(No external package dependencies are needed for the default `matmul` reference experiment as long as you use the `bin/` entrypoints.)*
-
-If you call modules directly instead of using the `bin/` entrypoints, expose the parent directory:
-```bash
-export PYTHONPATH="$(pwd)/..:${PYTHONPATH:-}"
-python -m autoresearch.backend.team_journal --experiment matmul init
-```
-
-### 2. Common Use Case: Clean Reset & Launch
-To clear previous state, initialize the databases, launch the topline manager, and start the live frontend dashboard, run the following sequence of commands:
 
 ```bash
 # 1. Clear previous run state (dry run by default; use --yes to force delete)
