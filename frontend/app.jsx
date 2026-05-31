@@ -109,9 +109,8 @@
             ●<span>Live</span></button>
           <div className="scrub-track-wrap">
             <div className="scrub-time mono">
-              <span>00:00</span>
+              <span>Step 0 (00:00)</span>
               <span className="live-tag">● LIVE</span>
-              <span className="mono scrub-born">0 experiments</span>
             </div>
             <div className="scrub-empty-track">waiting for first run</div>
           </div>
@@ -158,9 +157,8 @@
           {playIcon}<span>{playLabel}</span></button>
         <div className="scrub-track-wrap">
           <div className="scrub-time mono">
-            <span>{mmss(T)}</span>
-            {live ? <span className="live-tag">● LIVE</span> : <span className="mono scrub-of">{'of ' + mmss(E.meta.tMax)}</span>}
-            <span className="mono scrub-born">{bornNow + ' experiments'}</span>
+            <span>{'Step ' + bornNow + ' (' + mmss(T) + ')'}</span>
+            {live ? <span className="live-tag">● LIVE</span> : <span className="mono scrub-of">{' of ' + E.fns.bornCount(E.meta.tMax) + ' (' + mmss(E.meta.tMax) + ')'}</span>}
           </div>
           <div className="scrub-track" ref={trackRef} onPointerDown={down}>
             <svg className="spark" viewBox="0 0 100 100" preserveAspectRatio="none">
