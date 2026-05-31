@@ -703,7 +703,8 @@ class AutoresearchHandler(SimpleHTTPRequestHandler):
             self.send_json(400, {"ok": False, "error": str(exc)})
 
     def end_headers(self):
-        if self.path.endswith((".js", ".jsx", ".css", ".html")):
+        path = urlparse(self.path).path
+        if path.endswith((".js", ".jsx", ".css", ".html")):
             self.send_header("Cache-Control", "no-store, max-age=0")
         super().end_headers()
 
