@@ -222,6 +222,119 @@ def best_frontier_for_args(args: argparse.Namespace, db) -> dict:
     return team_journal.best_frontier(db, maximize=workflow_maximize(args))
 
 
+def frontier_signature(best: dict[str, object] | None) -> tuple[object, object]:
+    if not best:
+        return (None, None)
+    return (best.get("official_score"), best.get("hypothesis_id"))
+
+
+def recent_manager_frontiers(db, limit: int) -> list[tuple[object, object]]:
+    if limit <= 0:
+        return []
+    rows = db.execute(
+        """
+        SELECT payload_json
+        FROM manager_events
+        WHERE kind = 'manager_step'
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    out = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"])
+        except Exception:
+            continue
+        state = payload.get("state") if isinstance(payload, dict) else None
+        best = state.get("best_frontier") if isinstance(state, dict) else None
+        out.append(frontier_signature(best if isinstance(best, dict) else None))
+    return out
+
+
+def plateau_completion(args: argparse.Namespace, db, state: dict[str, object]) -> dict[str, object] | None:
+    steps = int(getattr(args, "completion_plateau_steps", 0) or 0)
+    if steps <= 0:
+        return None
+    best = state.get("best_frontier") if isinstance(state.get("best_frontier"), dict) else {}
+    sig = frontier_signature(best)
+    if sig == (None, None):
+        return None
+    streak = 1
+    for prev in recent_manager_frontiers(db, steps - 1):
+        if prev != sig:
+            break
+        streak += 1
+    if streak < steps:
+        return None
+    return {
+        "gate": "plateau_steps",
+        "plateau_steps": streak,
+        "threshold": steps,
+        "best_frontier": best,
+    }
+
+
+def time_bound_completion(args: argparse.Namespace, db) -> dict[str, object] | None:
+    max_seconds = float(getattr(args, "completion_max_seconds", 0.0) or 0.0)
+    if max_seconds <= 0:
+        return None
+    row = db.execute("SELECT MIN(created_at) AS started_at FROM agents").fetchone()
+    started_at = parse_message_time(row["started_at"]) if row and row["started_at"] else None
+    if started_at is None:
+        return None
+    elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
+    if elapsed < max_seconds:
+        return None
+    return {
+        "gate": "max_seconds",
+        "elapsed_seconds": elapsed,
+        "threshold": max_seconds,
+        "started_at": started_at.isoformat(),
+    }
+
+
+def target_completion(args: argparse.Namespace, state: dict[str, object]) -> dict[str, object] | None:
+    if not getattr(args, "completion_stop_on_target", False):
+        return None
+    workflow = workflow_config(args)
+    if "target" not in workflow:
+        return None
+    best = state.get("best_frontier") if isinstance(state.get("best_frontier"), dict) else {}
+    score = best.get("official_score") if isinstance(best, dict) else None
+    if score is None:
+        return None
+    try:
+        score_f = float(score)
+        target_f = float(workflow.get("target"))
+    except (TypeError, ValueError):
+        return None
+    reached = score_f >= target_f if workflow_maximize(args) else score_f <= target_f
+    if not reached:
+        return None
+    return {
+        "gate": "target",
+        "score": score,
+        "target": workflow.get("target"),
+        "best_frontier": best,
+    }
+
+
+def completion_decision(args: argparse.Namespace, db, state: dict[str, object]) -> dict[str, object] | None:
+    decision = target_completion(args, state)
+    if decision is None:
+        decision = plateau_completion(args, db, state)
+    if decision is None:
+        decision = time_bound_completion(args, db)
+    if decision is None:
+        return None
+    return {
+        "reason": "research_complete",
+        **decision,
+    }
+
+
 def connect_team(args: argparse.Namespace):
     if not args.db.exists():
         team_journal.init_db(args.db)
@@ -1725,6 +1838,14 @@ def spawn_agent(args: argparse.Namespace, role: str) -> str:
         cmd.append("--allow-seeded-strategies")
     if args.disable_meta_operator:
         cmd.append("--disable-meta-operator")
+    if args.allow_idle_retire:
+        cmd.append("--allow-idle-retire")
+    if args.completion_stop_on_target:
+        cmd.append("--completion-stop-on-target")
+    if args.completion_plateau_steps:
+        cmd.extend(["--completion-plateau-steps", str(args.completion_plateau_steps)])
+    if args.completion_max_seconds:
+        cmd.extend(["--completion-max-seconds", str(args.completion_max_seconds)])
     subprocess.Popen(cmd, cwd=str(REPO_ROOT), stdout=stdout, stderr=stderr, start_new_session=True)
     return agent_id
 
@@ -1748,8 +1869,9 @@ def run_manager_step(args: argparse.Namespace) -> None:
     state = team_journal.counts(db)
     state["best_frontier"] = team_journal.best_frontier(db, maximize=workflow_maximize(args))
     plan = team_journal.scale_plan(state, allow_idle_retire=args.allow_idle_retire)
+    completion = completion_decision(args, db, state)
     peer_counts = recent_peer_intent_counts(args, window_seconds=args.intent_window_seconds)
-    intended_actions = subtract_peer_intents(plan["actions"], peer_counts)
+    intended_actions = [] if completion else subtract_peer_intents(plan["actions"], peer_counts)
     signals = plan.get("signals", {}) if isinstance(plan.get("signals"), dict) else {}
     step_label = getattr(args, "step_index", "?")
     console_feedback(
@@ -1760,7 +1882,8 @@ def run_manager_step(args: argparse.Namespace) -> None:
         f"p={signals.get('pending_submissions', 0)} "
         f"agents={role_count_text(state.get('agents', {}))} "
         f"best={best_score_text(state.get('best_frontier'))} "
-        f"plan={action_count_text(intended_actions)}",
+        f"plan={action_count_text(intended_actions)}"
+        + (f" completion={completion.get('gate')}" if completion else ""),
     )
     db.execute(
         "INSERT INTO manager_events (kind, payload_json, created_at) VALUES (?, ?, ?)",
@@ -1769,6 +1892,7 @@ def run_manager_step(args: argparse.Namespace) -> None:
             json.dumps({
                 "stale": stale,
                 "plan": plan,
+                "completion": completion,
                 "peer_intents": {f"{k[0]}:{k[1]}": v for k, v in peer_counts.items()},
                 "intended_actions": intended_actions,
                 "state": state,
@@ -1779,10 +1903,15 @@ def run_manager_step(args: argparse.Namespace) -> None:
     db.commit()
     db.close()
 
+    if completion:
+        post(args.board, args.agent_id, "global", "stop", "research complete", completion)
+        post(args.board, args.agent_id, "manager-actions", "research_complete", "completion gate fired", completion)
+
     post(args.board, args.agent_id, "manager-actions", "scale_intent", "manager intent", {
         "actions": intended_actions,
         "peer_intents": {f"{k[0]}:{k[1]}": v for k, v in peer_counts.items()},
         "signals": plan.get("signals", {}),
+        "completion": completion,
     })
 
     applied = []
@@ -1865,6 +1994,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--intent-window-seconds", type=int, default=5)
     parser.add_argument("--startup-stop-window-seconds", type=int, default=10)
     parser.add_argument("--allow-idle-retire", action="store_true")
+    parser.add_argument("--completion-stop-on-target", action="store_true")
+    parser.add_argument("--completion-plateau-steps", type=int, default=0)
+    parser.add_argument("--completion-max-seconds", type=float, default=0.0)
     parser.add_argument("--apply-scale", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--allow-seeded-strategies", action="store_true")
     parser.add_argument("--disable-meta-operator", action="store_true")

@@ -330,17 +330,17 @@ def scale_plan(state: dict[str, Any], allow_idle_retire: bool = False) -> dict[s
     # verification should clear quickly; exploration expands when hypothesis
     # supply is low; implementation expands when hypothesis supply is high.
     idle = total_backlog == 0
-    manager_need = 0 if allow_idle_retire and idle else 1
+    manager_need = 1
     if total_backlog >= 24 or pending_sub >= 12:
         manager_need = 2
     if allow_idle_retire and idle:
         desired = {
             "topline_manager": manager_need,
-            "global_searcher": 0,
-            "creative_explorer": 0,
+            "global_searcher": 1,
+            "creative_explorer": 1,
             "implementor": 0,
             "verifier": 0,
-            "researcher": 0,
+            "researcher": 1,
             "insight_generator": 0,
             "meta_agent": 0,
         }

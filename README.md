@@ -168,6 +168,8 @@ python bin/autoresearch-agent topline_manager --experiment-root /path/to/my_env 
 
 `topline_manager` applies scale by default. It spawns explorers, searchers, researchers, implementors, verifiers, and other managers as needed. For a dry manager step that only prints/records intent without spawning workers, pass `--once --no-apply-scale`.
 
+For self-spindown, combine `--allow-idle-retire` with a completion gate such as `--completion-plateau-steps N`, `--completion-max-seconds S`, or `--completion-stop-on-target`.
+
 Environment variables are supported:
 
 ```bash
