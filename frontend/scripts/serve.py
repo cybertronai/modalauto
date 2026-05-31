@@ -407,6 +407,12 @@ def insert_control_hypothesis(con, *, title, rationale, movement, parent_id, pri
 
 
 class AutoresearchHandler(SimpleHTTPRequestHandler):
+    def handle(self):
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
     def end_no_cache_headers(self, content_type):
         self.send_response(200)
         self.send_header("Content-Type", content_type)

@@ -5,8 +5,7 @@
    branch diff panel. Click any node to reassign the active branch. */
 (function () {
   const { useState, useRef, useMemo, useEffect, useCallback } = React;
-  const RUNS = window.EVO_RUNS || [];
-  const BY = window.EVO_RUN_BY_ID || {};
+  const INITIAL_RUNS = window.EVO_RUNS || [];
   const fmt = (n) => {
     if (n == null) return '—';
     if (typeof n !== 'number') return String(n);
@@ -519,31 +518,49 @@
   }
 
   function App() {
+    const [runs, setRuns] = useState(INITIAL_RUNS);
+    const runsRef = useRef(runs);
+    const by = useMemo(() => {
+      const out = {};
+      runs.forEach((r) => { out[r.id] = r; });
+      return out;
+    }, [runs]);
+    const [runId, setRunId] = useState(() => (INITIAL_RUNS && INITIAL_RUNS[0] ? INITIAL_RUNS[0].id : 'live'));
+
     useEffect(() => {
-      if (!window.EventSource) return undefined;
-      const hadRuns = RUNS.length > 0;
-      let pending = false;
-      const reloadSoon = () => {
-        if (pending) return;
-        pending = true;
-        setTimeout(() => window.location.reload(), 250);
+      runsRef.current = runs;
+      window.EVO_RUNS = runs;
+      window.EVO_RUN_BY_ID = by;
+    }, [runs, by]);
+
+    useEffect(() => {
+      window.__AUTORESEARCH_APPLY_PAYLOAD = (payload) => {
+        if (!payload || !window.appWorld) return;
+        const world = window.appWorld(payload);
+        const id = (payload.meta && (payload.meta.seed || payload.meta.source)) || 'live';
+        const label = (payload.meta && (payload.meta.label || payload.meta.problem)) || 'Live Run';
+        const desc = (payload.meta && payload.meta.totalNodes != null ? payload.meta.totalNodes : world.nodes.length) + ' hypotheses'
+          + (payload.meta && payload.meta.best != null ? ' · best ' + fmt(payload.meta.best) : '');
+        const nextRun = { id, label, desc, world };
+        window.APP = world;
+        setRuns((prev) => {
+          const idx = prev.findIndex((r) => r.id === id);
+          if (idx >= 0) return prev.map((r, i) => i === idx ? nextRun : r);
+          if (prev.length === 1 && (prev[0].id === 'live' || prev[0].id === 'journal')) return [nextRun];
+          return [nextRun].concat(prev);
+        });
+        setRunId((cur) => cur && runsRef.current.some((r) => r.id === cur) ? cur : id);
       };
-      const isEmpty = (counts) => counts && ['agents', 'hypotheses', 'submissions', 'verifications', 'manager_events']
-        .every((key) => !counts[key]);
-      const hasWork = (counts) => counts && ['agents', 'hypotheses', 'submissions', 'verifications', 'manager_events']
-        .some((key) => counts[key] > 0);
-      const events = new EventSource('/api/events');
-      events.addEventListener('change', (event) => {
-        let payload = null;
-        try { payload = JSON.parse(event.data || '{}'); } catch (_) {}
-        const counts = payload && payload.counts;
-        if ((hadRuns && isEmpty(counts)) || (!hadRuns && hasWork(counts))) reloadSoon();
-      });
-      events.addEventListener('missing', () => { if (hadRuns) reloadSoon(); });
-      return () => events.close();
+      if (window.__AUTORESEARCH_PENDING_PAYLOAD) {
+        const pending = window.__AUTORESEARCH_PENDING_PAYLOAD;
+        delete window.__AUTORESEARCH_PENDING_PAYLOAD;
+        delete window.__AUTORESEARCH_PENDING_DATA;
+        window.__AUTORESEARCH_APPLY_PAYLOAD(pending);
+      }
+      return () => { delete window.__AUTORESEARCH_APPLY_PAYLOAD; };
     }, []);
 
-    if (!RUNS.length) {
+    if (!runs.length) {
       return (
         <div className="capp">
           <header className="ctop">
@@ -567,14 +584,13 @@
         </div>
       );
     }
-    const [runId, setRunId] = useState(() => (RUNS && RUNS[0] ? RUNS[0].id : 'panel'));
-    const run = BY[runId] || RUNS[0]; const world = run.world;
+    const run = by[runId] || runs[0]; const world = run.world;
     const cA = 'var(--cmp-a)', cB = 'var(--cmp-b)';
 
     // default branches: two leaves that fork from a real shared ancestor in the
     // SAME tree (deepest fork), so A and B genuinely diverge instead of being
     // two separate gen-0 roots.
-    const defaults = useMemo(() => bestBranchPair(world), [runId]);
+    const defaults = useMemo(() => bestBranchPair(world), [runId, world]);
 
     const [aNode, setANode] = useState(defaults.a);
     const [bNode, setBNode] = useState(defaults.b);
@@ -616,7 +632,7 @@
     // best-first, so you can pick the exact two to compare at any time.
     const selectable = useMemo(() => world.nodes
       .filter((n) => n.outcome === 'accept' && n.score != null)
-      .sort((x, y) => betterScore(world, x, y)), [runId]);
+      .sort((x, y) => betterScore(world, x, y)), [runId, world]);
 
     // Chip = click to make this side active (then click a tree node), plus a
     // dropdown to choose the candidate for this branch directly.
@@ -657,7 +673,7 @@
               <label className="run-pick inline">
                 <span className="rp-side">evolution</span>
                 <select value={runId} onChange={(e) => setRunId(e.target.value)}>
-                  {RUNS.map((r, i) => <option key={r.id + ':' + i} value={r.id}>{r.label}</option>)}
+                  {runs.map((r, i) => <option key={r.id + ':' + i} value={r.id}>{r.label}</option>)}
                 </select>
               </label>
             </div>

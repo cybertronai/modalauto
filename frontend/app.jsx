@@ -296,34 +296,6 @@
       return () => { delete window.__AUTORESEARCH_APPLY_PAYLOAD; };
     }, []);
 
-    useEffect(() => {
-      if (!window.EventSource) return;
-      let stopped = false;
-      let inFlight = false;
-      async function loadLatest() {
-        if (inFlight) return;
-        inFlight = true;
-        try {
-          const res = await fetch(apiUrl('/api/data', currentTask, { ts: Date.now() }), { cache: 'no-store' });
-          if (!res.ok) return;
-          const data = await res.json();
-          if (!stopped && data && data.payload) {
-            window.__AUTORESEARCH_APPLY_PAYLOAD(data.payload);
-          }
-        } catch (_) {
-        } finally {
-          inFlight = false;
-        }
-      }
-      const events = new EventSource(apiUrl('/api/events', currentTask));
-      events.addEventListener('change', loadLatest);
-      events.onerror = () => {};
-      return () => {
-        stopped = true;
-        events.close();
-      };
-    }, [currentTask]);
-
     // theme + accent
     useEffect(() => { if (t.theme === 'dark') document.documentElement.dataset.theme = 'dark'; else document.documentElement.removeAttribute('data-theme'); }, [t.theme]);
     useEffect(() => { const a = ACCENTS[t.accent] || ACCENTS.blue; Object.entries(a).forEach(([k, v]) => document.documentElement.style.setProperty(k, v)); }, [t.accent]);

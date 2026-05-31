@@ -132,8 +132,12 @@
 
   function App() {
     const [world, setWorld] = useState(window.APP);
+    const worldRef = useRef(world);
     const [T, setT] = useState(() => (window.APP && window.APP.meta.tNow) || 0);
     const [playing, setPlaying] = useState(false);
+    useEffect(() => {
+      worldRef.current = world;
+    }, [world]);
     useEffect(() => {
       if (!world || !playing) return;
       const step = Math.max(0.05, world.meta.tMax / 700);
@@ -141,26 +145,25 @@
       return () => clearInterval(id);
     }, [world, playing]);
     useEffect(() => {
-      let stopped = false;
-      async function load() {
-        try {
-          const res = await fetch('/api/data?ts=' + Date.now(), { cache: 'no-store' });
-          const data = await res.json();
-          if (!stopped && data && data.payload && window.appWorld) {
-            const next = window.appWorld(data.payload);
-            setWorld(next);
-            setT((cur) => cur >= ((world && world.meta.tNow) || 0) - 1 ? next.meta.tNow : Math.min(cur, next.meta.tMax));
-          }
-        } catch (_) {}
+      window.__AUTORESEARCH_APPLY_PAYLOAD = (payload) => {
+        if (!payload || !window.appWorld) return;
+        const previous = worldRef.current;
+        const next = window.appWorld(payload);
+        window.APP = next;
+        worldRef.current = next;
+        setWorld(next);
+        setT((cur) => {
+          const wasLive = !previous || cur >= previous.meta.tNow - 1;
+          return wasLive ? next.meta.tNow : Math.min(cur, next.meta.tMax);
+        });
+      };
+      if (window.__AUTORESEARCH_PENDING_PAYLOAD) {
+        const pending = window.__AUTORESEARCH_PENDING_PAYLOAD;
+        delete window.__AUTORESEARCH_PENDING_PAYLOAD;
+        delete window.__AUTORESEARCH_PENDING_DATA;
+        window.__AUTORESEARCH_APPLY_PAYLOAD(pending);
       }
-      load();
-      let es = null;
-      if (window.EventSource) {
-        es = new EventSource('/api/events');
-        es.addEventListener('change', load);
-      }
-      const poll = setInterval(load, 5000);
-      return () => { stopped = true; clearInterval(poll); if (es) es.close(); };
+      return () => { delete window.__AUTORESEARCH_APPLY_PAYLOAD; };
     }, []);
     if (!world) return <div className="app"><header className="top"><Logo /></header></div>;
     return (

@@ -239,7 +239,7 @@
     const { vis, edges, transferEdges } = useMemo(() => {
       const vis = [];
       E.nodes.forEach((n) => {
-        if (n.tVerified != null && n.tVerified <= T) vis.push(n);
+        if (n.tProposed != null && n.tProposed <= T) vis.push(n);
       });
       const set = new Set(vis.map((n) => n.id));
       const edges = [];
