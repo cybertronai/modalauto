@@ -519,6 +519,30 @@
   }
 
   function App() {
+    useEffect(() => {
+      if (!window.EventSource) return undefined;
+      const hadRuns = RUNS.length > 0;
+      let pending = false;
+      const reloadSoon = () => {
+        if (pending) return;
+        pending = true;
+        setTimeout(() => window.location.reload(), 250);
+      };
+      const isEmpty = (counts) => counts && ['agents', 'hypotheses', 'submissions', 'verifications', 'manager_events']
+        .every((key) => !counts[key]);
+      const hasWork = (counts) => counts && ['agents', 'hypotheses', 'submissions', 'verifications', 'manager_events']
+        .some((key) => counts[key] > 0);
+      const events = new EventSource('/api/events');
+      events.addEventListener('change', (event) => {
+        let payload = null;
+        try { payload = JSON.parse(event.data || '{}'); } catch (_) {}
+        const counts = payload && payload.counts;
+        if ((hadRuns && isEmpty(counts)) || (!hadRuns && hasWork(counts))) reloadSoon();
+      });
+      events.addEventListener('missing', () => { if (hadRuns) reloadSoon(); });
+      return () => events.close();
+    }, []);
+
     if (!RUNS.length) {
       return (
         <div className="capp">
