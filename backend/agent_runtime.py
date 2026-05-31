@@ -23,6 +23,7 @@ from autoresearch.backend import experiment_config
 from autoresearch.backend import message_board
 from autoresearch.backend import research_memory
 from autoresearch.backend import team_journal
+from autoresearch.backend import workshop_tracing
 from autoresearch.experiments.matmul.matmul import matmul
 from autoresearch.experiments.matmul.loop import buckets, verify_general
 
@@ -665,92 +666,119 @@ def transfer_payload(parent_hypothesis_id: str | None, donors: list[dict], domin
     }
 
 
+def workflow_template_items(workflow: dict, radical: bool) -> list[dict]:
+    key = "radical_hypothesis_templates" if radical else "hypothesis_templates"
+    value = workflow.get(key)
+    if value is None and radical:
+        value = workflow.get("hypothesis_templates")
+    if isinstance(value, dict):
+        value = value.get("radical" if radical else "default")
+    return value if isinstance(value, list) else []
+
+
+def workflow_template_payload(item: dict) -> tuple[str, str, str, dict]:
+    implementation = item.get("implementation")
+    if not isinstance(implementation, dict):
+        implementation = {k: v for k, v in item.items() if k not in {"title", "rationale", "expected_movement"}}
+    title = str(item.get("title") or implementation.get("env_id") or "Workflow hypothesis")
+    rationale = str(item.get("rationale") or "Run a workflow-defined candidate.")
+    movement = str(item.get("expected_movement") or "Measure whether this candidate improves the frontier.")
+    return title, rationale, movement, implementation
+
+
 def propose_hypothesis(args: argparse.Namespace, radical: bool = False) -> dict[str, str]:
     db = connect_team(args)
     existing = db.execute("SELECT COUNT(*) AS n FROM hypotheses").fetchone()["n"]
     best = best_frontier_for_args(args, db)
     parent_hypothesis_id = usable_frontier_parent(db, best) if existing else None
-    if radical and args.allow_seeded_strategies:
-        templates = [
-            (
-                "Reorient to sA-cache schedule",
-                "The current panel loop is plateaued because it does not make the hottest A read cost 1.",
-                "Use a concrete sA-cache generator with B scratch lanes and low-address accumulators.",
-                "sa_cache",
-            ),
-            (
-                "Reorient to dead-input/output reuse",
-                "The best prior direction reuses dead A/B storage for output cells and reduces final output read cost.",
-                "Use a concrete dead-input-output packed generator.",
-                "dead_io",
-            ),
-            (
-                "Global reorientation batch",
-                "Run the strongest non-baseline strategy set when the frontier has not improved.",
-                "Compare sA-cache and dead-input-output reuse in one fast batch.",
-                "global_reorient",
-            ),
-        ]
-    elif radical:
-        templates = [
-            (
-                "Search hot-read scratch layouts from first principles",
-                "The scorer rewards repeatedly-read values at low addresses. Try a loop order that reuses one input value across several multiplies and gives that live value the cheapest address.",
-                "Improve mul/copy read cost by moving a high-reuse temporary into the lowest scratch address.",
-                {
-                    "operator": "schedule_from_reasoning",
-                    "loop_order": ["i_block", "j_block", "k", "i_inner", "j_inner"],
-                    "tile": {"i": 8, "j": 4},
-                    "low_address_roles": ["single_input_cache", "multiply_tmp", "other_input_strip", "accumulators"],
-                    "reuse_goal": "hold one A value while sweeping several B columns",
-                },
-            ),
-            (
-                "Search liveness-safe output aliasing from first principles",
-                "Some input cells become dead before final output emission; test conservative aliasing candidates generated locally.",
-                "Reduce output storage/read cost without copying a prior packed scheme.",
-                {
-                    "operator": "schedule_from_reasoning",
-                    "loop_order": ["i_block", "j_block", "k", "j_inner", "i_inner"],
-                    "tile": {"i": 4, "j": 8},
-                    "low_address_roles": ["other_input_cache", "multiply_tmp", "input_strip", "accumulators"],
-                    "reuse_goal": "hold one B value while sweeping several A rows",
-                },
-            ),
-            (
-                "Global scratch schedule reorientation",
-                "The baseline panel loop is plateaued; run broad local schedule enumeration over cache dimensions and low-address scratch shapes.",
-                "Find a better schedule through generic parameterized enumeration.",
-                {
-                    "operator": "enumerate_schedule_family",
-                    "tiles": [{"i": 8, "j": 4}, {"i": 4, "j": 8}, {"i": 4, "j": 4}],
-                    "reuse_goals": ["hold_A_sweep_B", "hold_B_sweep_A"],
-                    "low_address_roles": ["input_cache", "multiply_tmp", "strip", "accumulators"],
-                },
-            ),
-        ]
+    workflow = workflow_config(args)
+    custom_templates = workflow_template_items(workflow, radical)
+    if custom_templates:
+        title, rationale, movement, plan = workflow_template_payload(
+            custom_templates[existing % len(custom_templates)]
+        )
     else:
-        templates = [
-            (
-                "Enumerate a new rectangular panel family",
-                "Small panel schedules are cheap to test and expose copy/mul/add bucket tradeoffs.",
-                "Find a panel shape with lower total verified score than current blind baseline.",
-                {"operator": "enumerate_panels"},
-            ),
-            (
-                "Test a low-address single-input cache from local frontier",
-                "The local frontier has high repeated operand reads; test a generic single-input cache schedule.",
-                "Try holding one input value across multiple products.",
-                {
-                    "operator": "schedule_from_reasoning",
-                    "loop_order": ["i_block", "j_block", "k", "i_inner", "j_inner"],
-                    "tile": {"i": 4, "j": 4},
-                    "low_address_roles": ["single_input_cache", "multiply_tmp", "other_input_strip", "accumulators"],
-                    "reuse_goal": "hold one A value while sweeping several B columns",
-                },
-            ),
-        ]
-    title, rationale, movement, plan = templates[existing % len(templates)]
+        if radical and args.allow_seeded_strategies:
+            templates = [
+                (
+                    "Reorient to sA-cache schedule",
+                    "The current panel loop is plateaued because it does not make the hottest A read cost 1.",
+                    "Use a concrete sA-cache generator with B scratch lanes and low-address accumulators.",
+                    "sa_cache",
+                ),
+                (
+                    "Reorient to dead-input/output reuse",
+                    "The best prior direction reuses dead A/B storage for output cells and reduces final output read cost.",
+                    "Use a concrete dead-input-output packed generator.",
+                    "dead_io",
+                ),
+                (
+                    "Global reorientation batch",
+                    "Run the strongest non-baseline strategy set when the frontier has not improved.",
+                    "Compare sA-cache and dead-input-output reuse in one fast batch.",
+                    "global_reorient",
+                ),
+            ]
+        elif radical:
+            templates = [
+                (
+                    "Search hot-read scratch layouts from first principles",
+                    "The scorer rewards repeatedly-read values at low addresses. Try a loop order that reuses one input value across several multiplies and gives that live value the cheapest address.",
+                    "Improve mul/copy read cost by moving a high-reuse temporary into the lowest scratch address.",
+                    {
+                        "operator": "schedule_from_reasoning",
+                        "loop_order": ["i_block", "j_block", "k", "i_inner", "j_inner"],
+                        "tile": {"i": 8, "j": 4},
+                        "low_address_roles": ["single_input_cache", "multiply_tmp", "other_input_strip", "accumulators"],
+                        "reuse_goal": "hold one A value while sweeping several B columns",
+                    },
+                ),
+                (
+                    "Search liveness-safe output aliasing from first principles",
+                    "Some input cells become dead before final output emission; test conservative aliasing candidates generated locally.",
+                    "Reduce output storage/read cost without copying a prior packed scheme.",
+                    {
+                        "operator": "schedule_from_reasoning",
+                        "loop_order": ["i_block", "j_block", "k", "j_inner", "i_inner"],
+                        "tile": {"i": 4, "j": 8},
+                        "low_address_roles": ["other_input_cache", "multiply_tmp", "input_strip", "accumulators"],
+                        "reuse_goal": "hold one B value while sweeping several A rows",
+                    },
+                ),
+                (
+                    "Global scratch schedule reorientation",
+                    "The baseline panel loop is plateaued; run broad local schedule enumeration over cache dimensions and low-address scratch shapes.",
+                    "Find a better schedule through generic parameterized enumeration.",
+                    {
+                        "operator": "enumerate_schedule_family",
+                        "tiles": [{"i": 8, "j": 4}, {"i": 4, "j": 8}, {"i": 4, "j": 4}],
+                        "reuse_goals": ["hold_A_sweep_B", "hold_B_sweep_A"],
+                        "low_address_roles": ["input_cache", "multiply_tmp", "strip", "accumulators"],
+                    },
+                ),
+            ]
+        else:
+            templates = [
+                (
+                    "Enumerate a new rectangular panel family",
+                    "Small panel schedules are cheap to test and expose copy/mul/add bucket tradeoffs.",
+                    "Find a panel shape with lower total verified score than current blind baseline.",
+                    {"operator": "enumerate_panels"},
+                ),
+                (
+                    "Test a low-address single-input cache from local frontier",
+                    "The local frontier has high repeated operand reads; test a generic single-input cache schedule.",
+                    "Try holding one input value across multiple products.",
+                    {
+                        "operator": "schedule_from_reasoning",
+                        "loop_order": ["i_block", "j_block", "k", "i_inner", "j_inner"],
+                        "tile": {"i": 4, "j": 4},
+                        "low_address_roles": ["single_input_cache", "multiply_tmp", "other_input_strip", "accumulators"],
+                        "reuse_goal": "hold one A value while sweeping several B columns",
+                    },
+                ),
+            ]
+        title, rationale, movement, plan = templates[existing % len(templates)]
     strategy = plan if isinstance(plan, str) else "reasoned"
     operator_payload = {"strategy": strategy} if isinstance(plan, str) else plan
     hyp_id = fresh_id("hyp")
@@ -785,6 +813,13 @@ def propose_hypothesis(args: argparse.Namespace, radical: bool = False) -> dict[
     db.commit()
     db.close()
     post(args.board, args.agent_id, "global", "hypothesis", title, {"hypothesis_id": hyp_id})
+    workshop_tracing.record_event("hypothesis_proposed", kind="journal_write", metadata={
+        "hypothesis_id": hyp_id,
+        "title": title,
+        "strategy": strategy,
+        "radical": radical,
+    })
+    workshop_tracing.update_trace(item_id=hyp_id, title=f"{args.role}: {title}")
     return {"hypothesis_id": hyp_id, "title": title, "strategy": strategy}
 
 
@@ -862,6 +897,12 @@ def run_insight_generator_step(args: argparse.Namespace) -> None:
     db.commit()
     db.close()
     post(args.board, args.agent_id, "global", "insight", "plateau heuristic generated", {
+        "hypothesis_id": hyp_id,
+        "recent_families": families,
+        "best_frontier": best,
+    })
+    workshop_tracing.update_trace(item_id=hyp_id, title="insight: plateau heuristic generated")
+    workshop_tracing.record_event("insight_hypothesis_recorded", kind="journal_write", metadata={
         "hypothesis_id": hyp_id,
         "recent_families": families,
         "best_frontier": best,
@@ -1395,6 +1436,14 @@ def run_meta_agent_step(args: argparse.Namespace) -> None:
         "duplicate_tool_id": operator.get("duplicate_tool_id"),
         "transfer_hypothesis_id": transfer_hyp_id,
     })
+    workshop_tracing.update_trace(item_id=hyp_id, title=f"meta_agent: {title}")
+    workshop_tracing.record_event("meta_operator_recorded", kind="journal_write", metadata={
+        "hypothesis_id": hyp_id,
+        "bottlenecks": bottlenecks,
+        "dominant_family": dominant_family,
+        "tool_id": tool_id,
+        "transfer_hypothesis_id": transfer_hyp_id,
+    })
     heartbeat(args, "idle")
 
 
@@ -1412,6 +1461,7 @@ def claim_hypothesis(args: argparse.Namespace):
     ).fetchone()
     if row is None:
         db.close()
+        workshop_tracing.record_event("no_hypothesis_available", kind="queue", metadata={})
         return None
     stamp = team_journal.now()
     db.execute(
@@ -1428,6 +1478,11 @@ def claim_hypothesis(args: argparse.Namespace):
     )
     db.commit()
     db.close()
+    workshop_tracing.update_trace(item_id=row["id"], title=f"implementor: {row['title']}")
+    workshop_tracing.record_event("hypothesis_claimed", kind="queue", metadata={
+        "hypothesis_id": row["id"],
+        "title": row["title"],
+    })
     return dict(row)
 
 
@@ -1446,28 +1501,43 @@ def run_implementor_step(args: argparse.Namespace) -> None:
     if strategy in seeded and not args.allow_seeded_strategies:
         strategy = "baseline"
     run_id = f"{args.agent_id}_{hyp['id']}_{utc_stamp()}"
+    workshop_tracing.update_trace(
+        item_id=hyp["id"],
+        run_id=run_id,
+        title=f"implementor: {hyp['title']}",
+        metadata={"strategy": strategy},
+    )
     hyp_path = args.worktree_root / args.agent_id / f"{run_id}.hypothesis.json"
     hyp_path.parent.mkdir(parents=True, exist_ok=True)
     payload = dict(implementation or {"operator": "enumerate_panels"})
     payload["strategy"] = strategy
+    payload.setdefault("hypothesis_id", hyp["id"])
+    payload.setdefault("title", hyp["title"])
     if payload.get("operator") == "promoted_tool":
         tool_path = Path(str(payload.get("tool_path") or ""))
         capability_path = hyp_path.with_suffix(".capability.json")
         capability_path.write_text(json.dumps(payload.get("base_capability") or payload, indent=2, sort_keys=True) + "\n")
-        proc_tool = subprocess.run(
-            [
-                sys.executable,
-                str(tool_path),
-                "--capability-json",
-                str(capability_path),
-                "--out",
-                str(hyp_path),
-            ],
-            cwd=str(REPO_ROOT),
-            text=True,
-            capture_output=True,
-            timeout=min(args.step_timeout, 30),
-        )
+        tool_cmd = [
+            sys.executable,
+            str(tool_path),
+            "--capability-json",
+            str(capability_path),
+            "--out",
+            str(hyp_path),
+        ]
+        with workshop_tracing.span("promoted_tool", kind="tool", metadata={"cmd": tool_cmd, "tool_path": str(tool_path)}) as sp:
+            proc_tool = subprocess.run(
+                tool_cmd,
+                cwd=str(REPO_ROOT),
+                text=True,
+                capture_output=True,
+                timeout=min(args.step_timeout, 30),
+            )
+            sp.set_output({
+                "returncode": proc_tool.returncode,
+                "stdout_tail": proc_tool.stdout[-1200:],
+                "stderr_tail": proc_tool.stderr[-1200:],
+            })
         if proc_tool.returncode != 0:
             hyp_path.write_text(json.dumps({"operator": "enumerate_panels"}, indent=2, sort_keys=True) + "\n")
             post(args.board, args.agent_id, "global", "promoted_tool_failed", proc_tool.stderr[-1000:], {
@@ -1475,21 +1545,24 @@ def run_implementor_step(args: argparse.Namespace) -> None:
                 "tool_path": str(tool_path),
             })
     else:
-        hyp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        with workshop_tracing.span("write_hypothesis_payload", kind="tool", metadata={"path": str(hyp_path), "operator": payload.get("operator")}):
+            hyp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     cmd = runner_command(args, run_id, hyp_path)
     workflow = workflow_config(args)
     domain = workflow_domain(workflow)
     prior_candidates = []
-    db = connect_team(args)
-    for row in db.execute("SELECT candidate_summary_json FROM submissions ORDER BY created_at DESC LIMIT 200"):
-        try:
-            summary = json.loads(row["candidate_summary_json"] or "{}")
-        except json.JSONDecodeError:
-            continue
-        name = (summary.get("best") or {}).get("name") if isinstance(summary, dict) else None
-        if name:
-            prior_candidates.append(str(name))
-    db.close()
+    with workshop_tracing.span("collect_prior_candidates", kind="task", metadata={"limit": 200}) as sp:
+        db = connect_team(args)
+        for row in db.execute("SELECT candidate_summary_json FROM submissions ORDER BY created_at DESC LIMIT 200"):
+            try:
+                summary = json.loads(row["candidate_summary_json"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            name = (summary.get("best") or {}).get("name") if isinstance(summary, dict) else None
+            if name:
+                prior_candidates.append(str(name))
+        db.close()
+        sp.set_output({"count": len(prior_candidates)})
     if prior_candidates:
         if domain == "matmul":
             cmd.extend(["--avoid-candidates-json", json.dumps(sorted(set(prior_candidates)))])
@@ -1504,7 +1577,13 @@ def run_implementor_step(args: argparse.Namespace) -> None:
         "hypothesis_json": str(hyp_path),
     })
     console_feedback(args, f"run+ {short_run_id(run_id)} strat={strategy}")
-    proc = subprocess.run(cmd, cwd=str(REPO_ROOT), text=True, capture_output=True, timeout=args.step_timeout)
+    with workshop_tracing.span("runner_subprocess", kind="tool", metadata={"cmd": cmd, "domain": domain, "timeout": args.step_timeout}) as sp:
+        proc = subprocess.run(cmd, cwd=str(REPO_ROOT), text=True, capture_output=True, timeout=args.step_timeout)
+        sp.set_output({
+            "returncode": proc.returncode,
+            "stdout_tail": proc.stdout[-2000:],
+            "stderr_tail": proc.stderr[-2000:],
+        })
     worktree = Path(hyp.get("worktree_path") or args.worktree_root / args.agent_id)
     worktree.mkdir(parents=True, exist_ok=True)
     (worktree / f"{run_id}.stdout.json").write_text(proc.stdout)
@@ -1520,6 +1599,12 @@ def run_implementor_step(args: argparse.Namespace) -> None:
         )
         db.commit()
         db.close()
+        workshop_tracing.record_event("implementor_failed", kind="error", metadata={
+            "run_id": run_id,
+            "hypothesis_id": hyp["id"],
+            "returncode": proc.returncode,
+            "stderr_tail": proc.stderr[-2000:],
+        })
         post(args.board, args.agent_id, "global", "implementor_failed", proc.stderr[-1000:], {
             "run_id": run_id,
             "hypothesis_id": hyp["id"],
@@ -1527,12 +1612,18 @@ def run_implementor_step(args: argparse.Namespace) -> None:
         })
         console_feedback(args, f"run! {short_run_id(run_id)} rc={proc.returncode}")
         return
-    result = parse_runner_result(proc.stdout)
-    artifact_dir = Path(result["artifact_dir"])
-    summary_path = artifact_dir / "summary.json"
-    summary = json.loads(summary_path.read_text()) if summary_path.exists() else dict(result)
-    if "best" not in summary and isinstance(result.get("best"), dict):
-        summary["best"] = result["best"]
+    with workshop_tracing.span("parse_runner_result", kind="task") as sp:
+        result = parse_runner_result(proc.stdout)
+        artifact_dir = Path(result["artifact_dir"])
+        summary_path = artifact_dir / "summary.json"
+        summary = json.loads(summary_path.read_text()) if summary_path.exists() else dict(result)
+        if "best" not in summary and isinstance(result.get("best"), dict):
+            summary["best"] = result["best"]
+        sp.set_output({
+            "artifact_dir": str(artifact_dir),
+            "best": summary.get("best"),
+            "status": summary.get("target_status") or result.get("status"),
+        })
     if not isinstance(summary.get("best"), dict):
         db = connect_team(args)
         stamp = team_journal.now()
@@ -1551,9 +1642,20 @@ def run_implementor_step(args: argparse.Namespace) -> None:
             "strategy": strategy,
             "artifact_dir": str(artifact_dir),
         })
+        workshop_tracing.record_event("experiment_skipped", kind="result", metadata={
+            "run_id": run_id,
+            "hypothesis_id": hyp["id"],
+            "status": status,
+            "artifact_dir": str(artifact_dir),
+        })
         console_feedback(args, f"run~ {short_run_id(run_id)} {status}")
         return
     artifact_path = submission_artifact_path(artifact_dir, summary, workflow)
+    workshop_tracing.record_event("runner_result_parsed", kind="result", metadata={
+        "artifact_dir": str(artifact_dir),
+        "artifact_path": str(artifact_path),
+        "best": summary.get("best"),
+    })
     db = connect_team(args)
     stamp = team_journal.now()
     sub_id = fresh_id("sub")
@@ -1582,6 +1684,12 @@ def run_implementor_step(args: argparse.Namespace) -> None:
     )
     db.commit()
     db.close()
+    workshop_tracing.record_event("submission_recorded", kind="journal_write", metadata={
+        "hypothesis_id": hyp["id"],
+        "submission_id": sub_id,
+        "score": summary.get("best", {}).get("score"),
+        "artifact_path": str(artifact_path),
+    })
     post(args.board, args.agent_id, "global", "submission", "candidate submitted", {
         "hypothesis_id": hyp["id"],
         "submission_id": sub_id,
@@ -1614,6 +1722,7 @@ def claim_submission(args: argparse.Namespace):
     ).fetchone()
     if row is None:
         db.close()
+        workshop_tracing.record_event("no_submission_available", kind="queue", metadata={})
         return None
     stamp = team_journal.now()
     db.execute(
@@ -1630,6 +1739,11 @@ def claim_submission(args: argparse.Namespace):
     )
     db.commit()
     db.close()
+    workshop_tracing.update_trace(item_id=row["hypothesis_id"], title=f"verifier: {row['id']}")
+    workshop_tracing.record_event("submission_claimed", kind="queue", metadata={
+        "submission_id": row["id"],
+        "hypothesis_id": row["hypothesis_id"],
+    })
     return dict(row)
 
 
@@ -1688,6 +1802,11 @@ def run_verifier_step(args: argparse.Namespace) -> None:
     if sub is None:
         heartbeat(args, "idle")
         return
+    workshop_tracing.update_trace(
+        item_id=sub["hypothesis_id"],
+        run_id=sub["id"],
+        title=f"verifier: {sub['id']}",
+    )
     path = Path(sub["artifact_path"])
     semantic = "invalid"
     score = None
@@ -1695,30 +1814,34 @@ def run_verifier_step(args: argparse.Namespace) -> None:
     bucket_json = "{}"
     workflow = workflow_config(args)
     summary = parse_json_object(sub["candidate_summary_json"])
-    try:
-        if workflow_domain(workflow) == "evogym":
-            semantic, score, bucket_json, error = verify_evogym_submission(path, summary)
-        elif workflow_domain(workflow) == "hide_and_seek_mjwarp":
-            best = summary.get("best") if isinstance(summary, dict) else {}
-            if not isinstance(best, dict) or "score" not in best:
-                raise ValueError("missing MJWarp training score")
-            score = int(best["score"])
-            semantic = "ok"
-            bucket_json = json.dumps({
-                "mean_hider_distance_reward": best.get("mean_hider_distance_reward"),
-                "improvement": best.get("improvement"),
-                "family": best.get("family"),
-            }, sort_keys=True)
-        else:
-            ir = path.read_text()
-            ok, message = verify_general(ir, cases=8, seed=20260530)
-            if not ok:
-                raise ValueError(message)
-            score = matmul.score_16x16(ir)
-            semantic = "ok"
-            bucket_json = json.dumps(buckets(ir), sort_keys=True)
-    except Exception as exc:  # noqa: BLE001
-        error = str(exc)
+    domain = workflow_domain(workflow)
+    with workshop_tracing.span("verify_submission", kind="tool", metadata={
+        "submission_id": sub["id"],
+        "hypothesis_id": sub["hypothesis_id"],
+        "artifact_path": str(path),
+        "domain": domain,
+    }) as sp:
+        try:
+            if domain == "evogym":
+                semantic, score, bucket_json, error = verify_evogym_submission(path, summary)
+            elif domain in {"hide_and_seek_mjwarp", "gym_mujoco"}:
+                best = summary.get("best") if isinstance(summary, dict) else {}
+                if not isinstance(best, dict) or "score" not in best:
+                    raise ValueError(f"missing {domain} training score")
+                score = int(best["score"])
+                semantic = "ok"
+                bucket_json = json.dumps(best, sort_keys=True)
+            else:
+                ir = path.read_text()
+                ok, message = verify_general(ir, cases=8, seed=20260530)
+                if not ok:
+                    raise ValueError(message)
+                score = matmul.score_16x16(ir)
+                semantic = "ok"
+                bucket_json = json.dumps(buckets(ir), sort_keys=True)
+        except Exception as exc:  # noqa: BLE001
+            error = str(exc)
+        sp.set_output({"semantic": semantic, "score": score, "error": error})
     db = connect_team(args)
     stamp = team_journal.now()
     ver_id = fresh_id("ver")
@@ -1742,6 +1865,14 @@ def run_verifier_step(args: argparse.Namespace) -> None:
     )
     db.commit()
     db.close()
+    workshop_tracing.record_event("verification_recorded", kind="journal_write", metadata={
+        "submission_id": sub["id"],
+        "verification_id": ver_id,
+        "decision": decision,
+        "semantic": semantic,
+        "score": score,
+        "error": error,
+    })
     post(args.board, args.agent_id, "global", "verification", decision, {
         "submission_id": sub["id"],
         "verification_id": ver_id,
@@ -1764,14 +1895,22 @@ def run_researcher_step(args: argparse.Namespace) -> None:
         query = queries[int(time.time()) % len(queries)]
     else:
         query = task["query"]
+        workshop_tracing.update_trace(item_id=task["id"], title=f"researcher: {query}")
     rows = []
     try:
-        for paper in research_memory.arxiv_query(query, max_results=2):
-            paper_id = research_memory.upsert_paper(db, {**paper, "tags": ["matmul", "researcher"]}, ["matmul", "researcher"])
-            rows.append({"paper_id": paper_id, "title": paper["title"]})
+        with workshop_tracing.span("arxiv_query", kind="tool", metadata={"query": query, "max_results": 2}) as sp:
+            for paper in research_memory.arxiv_query(query, max_results=2):
+                paper_id = research_memory.upsert_paper(db, {**paper, "tags": ["matmul", "researcher"]}, ["matmul", "researcher"])
+                rows.append({"paper_id": paper_id, "title": paper["title"]})
+            sp.set_output({"papers": rows})
         if task is not None:
             research_memory.complete_research_task(db, task["id"], "done", {"papers": rows})
         db.commit()
+        workshop_tracing.record_event("research_recorded", kind="journal_write", metadata={
+            "query": query,
+            "papers": rows,
+            "task_id": task["id"] if task else None,
+        })
         post(args.board, args.agent_id, "global", "research_update", query, {
             "papers": rows,
             "task_id": task["id"] if task else None,
@@ -1780,6 +1919,7 @@ def run_researcher_step(args: argparse.Namespace) -> None:
         if task is not None:
             research_memory.complete_research_task(db, task["id"], "failed", {"error": str(exc)})
             db.commit()
+        workshop_tracing.record_event("research_failed", kind="error", metadata={"query": query, "error": str(exc)})
         post(args.board, args.agent_id, "global", "research_failed", str(exc), {"query": query})
     finally:
         db.close()
@@ -1863,45 +2003,52 @@ def retire_agent(args: argparse.Namespace, role: str) -> str | None:
 
 def run_manager_step(args: argparse.Namespace) -> None:
     heartbeat(args, "working")
-    db = connect_team(args)
-    stale = team_journal.requeue_stale(db, args.stale_seconds)
-    team_journal.cleanup_scale_action_locks(db)
-    state = team_journal.counts(db)
-    state["best_frontier"] = team_journal.best_frontier(db, maximize=workflow_maximize(args))
-    plan = team_journal.scale_plan(state, allow_idle_retire=args.allow_idle_retire)
-    completion = completion_decision(args, db, state)
-    peer_counts = recent_peer_intent_counts(args, window_seconds=args.intent_window_seconds)
-    intended_actions = [] if completion else subtract_peer_intents(plan["actions"], peer_counts)
-    signals = plan.get("signals", {}) if isinstance(plan.get("signals"), dict) else {}
-    step_label = getattr(args, "step_index", "?")
-    console_feedback(
-        args,
-        f"step {step_label} "
-        f"q={signals.get('queued_hypotheses', 0)} "
-        f"c={signals.get('claimed_hypotheses', 0)} "
-        f"p={signals.get('pending_submissions', 0)} "
-        f"agents={role_count_text(state.get('agents', {}))} "
-        f"best={best_score_text(state.get('best_frontier'))} "
-        f"plan={action_count_text(intended_actions)}"
-        + (f" completion={completion.get('gate')}" if completion else ""),
-    )
-    db.execute(
-        "INSERT INTO manager_events (kind, payload_json, created_at) VALUES (?, ?, ?)",
-        (
-            "manager_step",
-            json.dumps({
-                "stale": stale,
-                "plan": plan,
-                "completion": completion,
-                "peer_intents": {f"{k[0]}:{k[1]}": v for k, v in peer_counts.items()},
-                "intended_actions": intended_actions,
-                "state": state,
-            }, sort_keys=True),
-            team_journal.now(),
-        ),
-    )
-    db.commit()
-    db.close()
+    with workshop_tracing.span("compute_scale_plan", kind="task") as sp:
+        db = connect_team(args)
+        stale = team_journal.requeue_stale(db, args.stale_seconds)
+        team_journal.cleanup_scale_action_locks(db)
+        state = team_journal.counts(db)
+        state["best_frontier"] = team_journal.best_frontier(db, maximize=workflow_maximize(args))
+        plan = team_journal.scale_plan(state, allow_idle_retire=args.allow_idle_retire)
+        completion = completion_decision(args, db, state)
+        peer_counts = recent_peer_intent_counts(args, window_seconds=args.intent_window_seconds)
+        intended_actions = [] if completion else subtract_peer_intents(plan["actions"], peer_counts)
+        signals = plan.get("signals", {}) if isinstance(plan.get("signals"), dict) else {}
+        step_label = getattr(args, "step_index", "?")
+        console_feedback(
+            args,
+            f"step {step_label} "
+            f"q={signals.get('queued_hypotheses', 0)} "
+            f"c={signals.get('claimed_hypotheses', 0)} "
+            f"p={signals.get('pending_submissions', 0)} "
+            f"agents={role_count_text(state.get('agents', {}))} "
+            f"best={best_score_text(state.get('best_frontier'))} "
+            f"plan={action_count_text(intended_actions)}"
+            + (f" completion={completion.get('gate')}" if completion else ""),
+        )
+        db.execute(
+            "INSERT INTO manager_events (kind, payload_json, created_at) VALUES (?, ?, ?)",
+            (
+                "manager_step",
+                json.dumps({
+                    "stale": stale,
+                    "plan": plan,
+                    "completion": completion,
+                    "peer_intents": {f"{k[0]}:{k[1]}": v for k, v in peer_counts.items()},
+                    "intended_actions": intended_actions,
+                    "state": state,
+                }, sort_keys=True),
+                team_journal.now(),
+            ),
+        )
+        db.commit()
+        db.close()
+        sp.set_output({
+            "stale": stale,
+            "intended_actions": intended_actions,
+            "signals": signals,
+            "completion": completion,
+        })
 
     if completion:
         post(args.board, args.agent_id, "global", "stop", "research complete", completion)
@@ -1916,28 +2063,30 @@ def run_manager_step(args: argparse.Namespace) -> None:
 
     applied = []
     if args.apply_scale:
-        slots: dict[tuple[str, str], int] = {}
-        for action in intended_actions:
-            if should_stop(args):
-                applied.append({"action": action["action"], "role": action["role"], "skipped": "stop_requested"})
-                break
-            role = action["role"]
-            key = (str(action["action"]), str(role))
-            slot = slots.get(key, 0)
-            slots[key] = slot + 1
-            db = connect_team(args)
-            acquired = team_journal.try_acquire_scale_action_lock(db, action_lock_key(action, slot), args.agent_id)
-            db.commit()
-            db.close()
-            if not acquired:
-                applied.append({"action": action["action"], "role": role, "skipped": "lock_held", "slot": slot})
-                continue
-            if action["action"] == "spawn":
-                spawned = spawn_agent(args, role)
-                applied.append({"action": "spawn", "role": role, "agent_id": spawned, "slot": slot})
-            elif action["action"] == "retire":
-                retired = retire_agent(args, role)
-                applied.append({"action": "retire", "role": role, "agent_id": retired, "slot": slot})
+        with workshop_tracing.span("apply_scale_actions", kind="tool", metadata={"actions": intended_actions}) as sp:
+            slots: dict[tuple[str, str], int] = {}
+            for action in intended_actions:
+                if should_stop(args):
+                    applied.append({"action": action["action"], "role": action["role"], "skipped": "stop_requested"})
+                    break
+                role = action["role"]
+                key = (str(action["action"]), str(role))
+                slot = slots.get(key, 0)
+                slots[key] = slot + 1
+                db = connect_team(args)
+                acquired = team_journal.try_acquire_scale_action_lock(db, action_lock_key(action, slot), args.agent_id)
+                db.commit()
+                db.close()
+                if not acquired:
+                    applied.append({"action": action["action"], "role": role, "skipped": "lock_held", "slot": slot})
+                    continue
+                if action["action"] == "spawn":
+                    spawned = spawn_agent(args, role)
+                    applied.append({"action": "spawn", "role": role, "agent_id": spawned, "slot": slot})
+                elif action["action"] == "retire":
+                    retired = retire_agent(args, role)
+                    applied.append({"action": "retire", "role": role, "agent_id": retired, "slot": slot})
+            sp.set_output({"applied": applied})
 
     payload = {
         "stale": stale,
@@ -1952,24 +2101,29 @@ def run_manager_step(args: argparse.Namespace) -> None:
 
 
 def run_step(args: argparse.Namespace) -> None:
-    if args.role == "creative_explorer":
-        run_creative_step(args)
-    elif args.role == "global_searcher":
-        run_global_searcher_step(args)
-    elif args.role == "implementor":
-        run_implementor_step(args)
-    elif args.role == "verifier":
-        run_verifier_step(args)
-    elif args.role == "researcher":
-        run_researcher_step(args)
-    elif args.role == "insight_generator":
-        run_insight_generator_step(args)
-    elif args.role == "meta_agent":
-        run_meta_agent_step(args)
-    elif args.role == "topline_manager":
-        run_manager_step(args)
-    else:
-        raise SystemExit(f"unhandled role: {args.role}")
+    with workshop_tracing.trace_step(args, kind=args.role, title=f"{args.role} step", metadata={
+        "experiment": args.experiment_root.name,
+        "team_id": args.team_id,
+        "workflow": str(args.workflow_path),
+    }):
+        if args.role == "creative_explorer":
+            run_creative_step(args)
+        elif args.role == "global_searcher":
+            run_global_searcher_step(args)
+        elif args.role == "implementor":
+            run_implementor_step(args)
+        elif args.role == "verifier":
+            run_verifier_step(args)
+        elif args.role == "researcher":
+            run_researcher_step(args)
+        elif args.role == "insight_generator":
+            run_insight_generator_step(args)
+        elif args.role == "meta_agent":
+            run_meta_agent_step(args)
+        elif args.role == "topline_manager":
+            run_manager_step(args)
+        else:
+            raise SystemExit(f"unhandled role: {args.role}")
 
 
 def main(argv: list[str] | None = None) -> int:

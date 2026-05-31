@@ -164,6 +164,27 @@ CREATE TABLE IF NOT EXISTS control_actions (
     created_at           TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS agent_traces (
+    id              TEXT PRIMARY KEY,
+    agent_id        TEXT,
+    role            TEXT,
+    kind            TEXT NOT NULL,
+    item_id         TEXT,
+    run_id          TEXT,
+    title           TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'running'
+                    CHECK (status IN ('running', 'ok', 'failed')),
+    started_at      TEXT NOT NULL,
+    ended_at        TEXT,
+    duration_ms     INTEGER,
+    workshop_url    TEXT,
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    spans_json      TEXT NOT NULL DEFAULT '[]',
+    error           TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_agents_role_status ON agents(role, status);
 CREATE INDEX IF NOT EXISTS idx_hyp_status_priority ON hypotheses(status, priority DESC, created_at);
 CREATE INDEX IF NOT EXISTS idx_sub_status ON submissions(status, created_at);
@@ -172,6 +193,9 @@ CREATE INDEX IF NOT EXISTS idx_tools_status ON promoted_tools(status, created_at
 CREATE INDEX IF NOT EXISTS idx_tools_signature ON promoted_tools(signature, status);
 CREATE INDEX IF NOT EXISTS idx_branch_controls_status ON branch_controls(status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_control_actions_created ON control_actions(created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_traces_agent ON agent_traces(agent_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_agent_traces_item ON agent_traces(item_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_agent_traces_run ON agent_traces(run_id, started_at);
 """
 
 

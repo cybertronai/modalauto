@@ -1,6 +1,17 @@
 (function () {
   function appWorld(payload) {
     const maximize = String(payload.meta.direction || 'minimize').toLowerCase() === 'maximize';
+    payload.traces = Array.isArray(payload.traces) ? payload.traces : [];
+    payload.traceById = {};
+    payload.tracesByAgent = {};
+    payload.tracesByItem = {};
+    payload.tracesByRun = {};
+    payload.traces.forEach((tr) => {
+      payload.traceById[tr.id] = tr;
+      if (tr.agentId) (payload.tracesByAgent[tr.agentId] || (payload.tracesByAgent[tr.agentId] = [])).push(tr);
+      if (tr.itemId) (payload.tracesByItem[tr.itemId] || (payload.tracesByItem[tr.itemId] = [])).push(tr);
+      if (tr.runId) (payload.tracesByRun[tr.runId] || (payload.tracesByRun[tr.runId] = [])).push(tr);
+    });
     function statusAt(n, T) {
       if (T < n.tProposed) return 'unborn';
       if (n.abandoned) return T > n.tProposed + 18 ? 'abandoned' : 'queued';

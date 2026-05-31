@@ -34,6 +34,18 @@
     return String(Math.floor(total / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
   };
   const directionLabel = () => String((E && E.meta && E.meta.direction) || 'minimize').toLowerCase() === 'maximize' ? 'maximize' : 'minimize';
+  const hoverPreviewKey = (world) => {
+    const meta = (world && world.meta) || {};
+    return 'autoresearch.hoverPreviewRuns:' + (meta.source || meta.sourceDb || meta.problem || 'default');
+  };
+  const readHoverPreviewIds = (key) => {
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(key) || '[]');
+      return Array.isArray(parsed) ? parsed.filter((id) => typeof id === 'string') : [];
+    } catch (_) {
+      return [];
+    }
+  };
 
   function Logo() {
     return (
@@ -187,7 +199,9 @@
     const InspectorPanel = window.InspectorPanel;
     const TeamPanel = window.TeamPanel;
     const HypothesesPanel = window.HypothesesPanel;
+    const TracesPanel = window.TracesPanel;
     const ActivityPanel = window.ActivityPanel;
+    const TracePanel = window.TracePanel;
     const TweaksPanel = window.TweaksPanel;
     const TweakSection = window.TweakSection;
     const TweakRadio = window.TweakRadio;
@@ -198,7 +212,10 @@
     const [playing, setPlaying] = useState(false);
     const [speed, setSpeed] = useState(t.speed || 1);
     const [selected, setSelected] = useState(null);
+    const [selectedTrace, setSelectedTrace] = useState(null);
     const [branchSelection, setBranchSelection] = useState([]);
+    const previewStoreKey = useMemo(() => hoverPreviewKey(world), [world && world.meta && world.meta.source, world && world.meta && world.meta.sourceDb, world && world.meta && world.meta.problem]);
+    const [hoverPreviewIds, setHoverPreviewIds] = useState(() => readHoverPreviewIds(hoverPreviewKey(E)));
 
     useEffect(() => {
       worldRef.current = world;
@@ -219,6 +236,7 @@
           return wasLive ? next.meta.tNow : Math.min(cur, next.meta.tMax);
         });
         setSelected((id) => id && next.nodes.some((n) => n.id === id) ? id : null);
+        setSelectedTrace((id) => id && next.traceById && next.traceById[id] ? id : null);
         setBranchSelection((ids) => ids.filter((id) => next.nodes.some((n) => n.id === id)).slice(-2));
       };
       if (window.__AUTORESEARCH_PENDING_PAYLOAD) {
@@ -228,6 +246,24 @@
       }
       return () => { delete window.__AUTORESEARCH_APPLY_PAYLOAD; };
     }, []);
+
+    useEffect(() => {
+      setHoverPreviewIds(readHoverPreviewIds(previewStoreKey));
+    }, [previewStoreKey]);
+
+    useEffect(() => {
+      const existing = new Set((world.nodes || []).map((n) => n.id));
+      setHoverPreviewIds((ids) => {
+        const next = ids.filter((id) => existing.has(id));
+        return next.length === ids.length ? ids : next;
+      });
+    }, [world]);
+
+    useEffect(() => {
+      try {
+        window.localStorage.setItem(previewStoreKey, JSON.stringify(hoverPreviewIds));
+      } catch (_) {}
+    }, [previewStoreKey, hoverPreviewIds]);
 
     useEffect(() => {
       if (!window.EventSource) return;
@@ -275,10 +311,21 @@
 
     const onSelect = useCallback((id, opts = {}) => {
       setSelected(id);
+      setSelectedTrace(null);
       setBranchSelection((prev) => {
         if (!opts.shift) return [id];
         const next = prev.filter((x) => x !== id).concat(id);
         return next.slice(-2);
+      });
+    }, []);
+    const onTrace = useCallback((id) => {
+      setSelected(null);
+      setSelectedTrace(id);
+    }, []);
+    const onToggleHoverPreview = useCallback((id) => {
+      setHoverPreviewIds((ids) => {
+        if (ids.includes(id)) return ids.filter((x) => x !== id);
+        return ids.concat(id);
       });
     }, []);
 
@@ -319,15 +366,37 @@
 
         <div className="body">
           <main className="canvas">
-            <EvoTree T={T} selected={selected} onSelect={onSelect} density={t.density} scoreLabels={t.scoreLabels} dimOffLineage={t.dimOffLineage} />
+            <EvoTree
+              T={T}
+              selected={selected}
+              onSelect={onSelect}
+              density={t.density}
+              scoreLabels={t.scoreLabels}
+              dimOffLineage={t.dimOffLineage}
+              hoverPreviewIds={hoverPreviewIds}
+              onToggleHoverPreview={onToggleHoverPreview}
+            />
           </main>
           <aside className="sidebar">
-            {selected
-            ? <InspectorPanel nodeId={selected} T={T} speed={speed} onClose={() => setSelected(null)} onSelect={onSelect} branchSelection={branchSelection} />
+            {selectedTrace
+            ? <TracePanel traceId={selectedTrace} onClose={() => setSelectedTrace(null)} onSelect={onSelect} />
+            : selected
+            ? <InspectorPanel
+                nodeId={selected}
+                T={T}
+                speed={speed}
+                onClose={() => setSelected(null)}
+                onSelect={onSelect}
+                onTrace={onTrace}
+                branchSelection={branchSelection}
+                hoverPreviewIds={hoverPreviewIds}
+                onToggleHoverPreview={onToggleHoverPreview}
+              />
               : <div className="sb-split">
-                  <TeamPanel T={T} onSelect={onSelect} />
+                  <TeamPanel T={T} onSelect={onSelect} onTrace={onTrace} />
                   <HypothesesPanel T={T} onSelect={onSelect} />
-                  {t.showFeed ? <ActivityPanel T={T} onSelect={onSelect} /> : null}
+                  <TracesPanel T={T} onTrace={onTrace} />
+                  {t.showFeed ? <ActivityPanel T={T} onSelect={onSelect} onTrace={onTrace} /> : null}
                 </div>}
           </aside>
         </div>
