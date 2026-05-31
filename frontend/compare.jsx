@@ -15,7 +15,12 @@
     const maximumFractionDigits = Number.isInteger(n) ? 0 : abs >= 100 ? 2 : abs >= 1 ? 3 : 4;
     return n.toLocaleString(undefined, { maximumFractionDigits });
   };
-  const mmss = (t) => String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(Math.round(t % 60)).padStart(2, '0');
+  const finiteTime = (t, fallback = 0) => (typeof t === 'number' && Number.isFinite(t) ? t : fallback);
+  const mmss = (t) => {
+    const safe = Math.max(0, finiteTime(t));
+    const total = Math.round(safe);
+    return String(Math.floor(total / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
+  };
   const fitVar = (f) => `var(--fit-${f})`;
   const isMaximize = (world) => String((world.meta && world.meta.direction) || 'minimize').toLowerCase() === 'maximize';
   const isMatmulDomain = (world) => String((world.meta && world.meta.domain) || '').toLowerCase().includes('matmul');
@@ -157,7 +162,7 @@
       if (!values.length) values.push(0, 1);
       const low = Math.min(...values);
       const high = Math.max(...values);
-      return { low, high, span: Math.max(1e-9, high - low), worst: isMaximize(world) ? low : high, tMax: world.meta.tMax };
+      return { low, high, span: Math.max(1e-9, high - low), worst: isMaximize(world) ? low : high, tMax: Math.max(1, finiteTime(world.meta.tMax, 1)) };
     }, [world]);
     const scoreY = (score) => {
       const sc = Math.max(dom.low, Math.min(dom.high, score));
@@ -176,7 +181,7 @@
         }
       });
       const o = {};
-      world.nodes.forEach((n) => { o[n.id] = { x: pad + (n.tProposed / dom.tMax) * (W - 2 * pad), y: scoreY(ls[n.id]) }; });
+      world.nodes.forEach((n) => { o[n.id] = { x: pad + (finiteTime(n.tProposed) / dom.tMax) * (W - 2 * pad), y: scoreY(ls[n.id]) }; });
       return o;
     }, [world, dom]);
     const linA = useMemo(() => new Set(lineageArr(world, aNode).map((n) => n.id)), [world, aNode]);

@@ -14,7 +14,14 @@
     return n.toLocaleString(undefined, { maximumFractionDigits });
   };
   const ROLE_LANES = ['topline_manager', 'meta_agent', 'insight_generator', 'creative_explorer', 'global_searcher', 'implementor', 'verifier', 'researcher'];
-  const mmss = (t) => String(Math.floor(t / 60)).padStart(2, '0') + ':' + String(Math.round(t % 60)).padStart(2, '0');
+  const finiteTime = (t, fallback = 0) => (typeof t === 'number' && Number.isFinite(t) ? t : fallback);
+  const mmss = (t) => {
+    const safe = Math.max(0, finiteTime(t));
+    const total = Math.round(safe);
+    const minutes = Math.floor(total / 60);
+    const seconds = total % 60;
+    return String(minutes).padStart(2, '0') + ':' + String(seconds).padStart(2, '0');
+  };
   function hash01(s) {
     let h = 2166136261;
     for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
@@ -103,9 +110,13 @@
     }
 
     const pos = {};
-    const nodeTimes = E.nodes.map((n) => n.tVerified || n.tProposed || 0);
-    const tMin = Math.min(...nodeTimes);
-    const tSpan = Math.max(1, Math.max(...nodeTimes) - tMin);
+    const nodeTimes = E.nodes
+      .map((n) => finiteTime(n.tVerified ?? n.tProposed, null))
+      .filter((t) => t != null);
+    const metaTMax = Math.max(1, finiteTime(E.meta.tMax, 1));
+    const tMin = nodeTimes.length ? Math.min(...nodeTimes) : 0;
+    const tMax = Math.max(metaTMax, nodeTimes.length ? Math.max(...nodeTimes) : 0);
+    const tSpan = Math.max(1, tMax - tMin);
     const duplicateOffset = {};
     const scoreGroups = {};
     E.nodes.forEach((n) => {

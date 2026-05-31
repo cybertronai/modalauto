@@ -6,7 +6,12 @@
   const ROLE_VAR = { topline_manager: '--role-manager', meta_agent: '--role-meta', insight_generator: '--role-insight', creative_explorer: '--role-explorer', global_searcher: '--role-searcher', researcher: '--role-researcher', implementor: '--role-implementor', verifier: '--role-verifier' };
   const roleCol = (r) => `var(${ROLE_VAR[r] || '--ink-3'})`;
   const fmt = (n) => n == null ? '-' : typeof n === 'number' ? n.toLocaleString(undefined, { maximumFractionDigits: Number.isInteger(n) ? 0 : 3 }) : String(n);
-  const mmss = (t) => String(Math.floor((t || 0) / 60)).padStart(2, '0') + ':' + String(Math.round((t || 0) % 60)).padStart(2, '0');
+  const finiteTime = (t, fallback = 0) => (typeof t === 'number' && Number.isFinite(t) ? t : fallback);
+  const mmss = (t) => {
+    const safe = Math.max(0, finiteTime(t));
+    const total = Math.round(safe);
+    return String(Math.floor(total / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
+  };
 
   function Logo() {
     return (
@@ -108,10 +113,11 @@
   function ProcessScrubber({ world, T, setT, playing, setPlaying }) {
     const ref = useRef(null);
     const live = T >= world.meta.tNow - 0.5;
-    const pct = world.meta.tMax ? (T / world.meta.tMax) * 100 : 0;
+    const tMax = Math.max(1, finiteTime(world.meta.tMax, 1));
+    const pct = Math.max(0, Math.min(100, (finiteTime(T) / tMax) * 100));
     const seek = (clientX) => {
       const r = ref.current.getBoundingClientRect();
-      setT(Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * world.meta.tMax);
+      setT(Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * tMax);
       setPlaying(false);
     };
     return (
