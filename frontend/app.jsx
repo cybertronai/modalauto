@@ -85,7 +85,7 @@
       load();
       const id = setInterval(load, 3000);
       return () => { stopped = true; clearInterval(id); };
-    }, [E.series, E.meta.baseline, E.meta.best, E.meta.tMax]);
+    }, [E ? E.series : null, E ? E.meta.baseline : null, E ? E.meta.best : null, E ? E.meta.tMax : null]);
     if (!info || !info.frames) return null;
     const last = info.frames[info.frames.length - 1];
     const counts = last && last.counts ? last.counts : {};
@@ -194,7 +194,7 @@
     const TweakColor = window.TweakColor;
     const TweakToggle = window.TweakToggle;
     const [t, setTweak] = window.useTweaks(TWEAK_DEFAULTS);
-    const [T, setT] = useState(E.meta.tNow);
+    const [T, setT] = useState(E ? E.meta.tNow : 0);
     const [playing, setPlaying] = useState(false);
     const [speed, setSpeed] = useState(t.speed || 1);
     const [selected, setSelected] = useState(null);
@@ -265,7 +265,7 @@
 
     // playback loop
     useEffect(() => {
-      if (!playing) return;
+      if (!playing || !E) return;
       const step = E.meta.tMax / 900;
       const iv = setInterval(() => {
         setT((cur) => { const nx = cur + step * speed; if (nx >= E.meta.tMax) { setPlaying(false); return E.meta.tMax; } return nx; });
@@ -281,6 +281,22 @@
         return next.slice(-2);
       });
     }, []);
+
+    if (!world) {
+      return (
+        <div className="app app-empty">
+          <header className="top">
+            <div className="top-left">
+              <Logo />
+              <div className="prob">
+                <span className="prob-name">No live autoresearch data</span>
+                <span className="prob-sub mono">start the Autoresearch server with a journal DB</span>
+              </div>
+            </div>
+          </header>
+        </div>
+      );
+    }
 
     return (
       <div className="app">
@@ -339,23 +355,6 @@
   }
 
   function boot() {
-    E = window.APP;
-    if (!E) {
-      ReactDOM.createRoot(document.getElementById('root')).render(
-        <div className="app app-empty">
-          <header className="top">
-            <div className="top-left">
-              <Logo />
-              <div className="prob">
-                <span className="prob-name">No live autoresearch data</span>
-                <span className="prob-sub mono">start the Autoresearch server with a journal DB</span>
-              </div>
-            </div>
-          </header>
-        </div>
-      )
-      return;
-    }
     ReactDOM.createRoot(document.getElementById('root')).render(<App />);
   }
 
