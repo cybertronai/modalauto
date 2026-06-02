@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "jsx": "preserve",
+    "lib": ["DOM", "ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "noEmit": true,
+    "strict": false,
+    "target": "ES2022"
+  },
+  "include": ["*.ts", "*.tsx", "*.js", "*.jsx"]
+}

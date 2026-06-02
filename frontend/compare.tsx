@@ -6,20 +6,9 @@
 (function () {
   const { useState, useRef, useMemo, useEffect, useCallback } = React;
   const INITIAL_RUNS = window.EVO_RUNS || [];
-  const fmt = (n) => {
-    if (n == null) return '—';
-    if (typeof n !== 'number') return String(n);
-    if (!Number.isFinite(n)) return String(n);
-    const abs = Math.abs(n);
-    const maximumFractionDigits = Number.isInteger(n) ? 0 : abs >= 100 ? 2 : abs >= 1 ? 3 : 4;
-    return n.toLocaleString(undefined, { maximumFractionDigits });
-  };
+  const fmt = window.AutoresearchUI.fmt;
   const finiteTime = (t, fallback = 0) => (typeof t === 'number' && Number.isFinite(t) ? t : fallback);
-  const mmss = (t) => {
-    const safe = Math.max(0, finiteTime(t));
-    const total = Math.round(safe);
-    return String(Math.floor(total / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
-  };
+  const mmss = window.AutoresearchUI.mmss;
   const fitVar = (f) => `var(--fit-${f})`;
   const isMaximize = (world) => String((world.meta && world.meta.direction) || 'minimize').toLowerCase() === 'maximize';
   const isMatmulDomain = (world) => String((world.meta && world.meta.domain) || '').toLowerCase().includes('matmul');
@@ -94,10 +83,10 @@
   function clamp(n, lo, hi) {
     return Math.max(lo, Math.min(hi, n));
   }
-  function syncSections(scroller) {
+  function syncSections(scroller: HTMLElement) {
     if (!scroller) return [];
     const base = scroller.getBoundingClientRect();
-    const sections = Array.from(scroller.querySelectorAll('[data-sync-section]')).map((el) => {
+    const sections = Array.from(scroller.querySelectorAll('[data-sync-section]')).map((el: HTMLElement) => {
       const rect = el.getBoundingClientRect();
       return {
         key: el.getAttribute('data-sync-section'),
@@ -312,7 +301,7 @@
         </div>
         {Object.keys(legend).length ? <div className="voxel-legend">
           {Object.entries(legend).map(([k, v]) => (
-            <span key={k} className="voxel-legend-item"><span className={'voxel-swatch v' + k} />{v}</span>
+            <span key={k} className="voxel-legend-item"><span className={'voxel-swatch v' + k} />{String(v)}</span>
           ))}
         </div> : null}
       </div>
@@ -487,8 +476,8 @@
       </div>
     );
   }
-  function DiffRow({ k, a, b, f, lowerBetter, neutral }) {
-    f = f || fmt; let aw = false, bw = false;
+  function DiffRow({ k, a, b, f = fmt, lowerBetter = false, neutral = false }) {
+    let aw = false, bw = false;
     if (!neutral && a !== b && typeof a === 'number') { if (lowerBetter) { aw = a < b; bw = b < a; } else { aw = a > b; bw = b > a; } }
     const va = f(a);
     const vb = f(b);
@@ -698,10 +687,10 @@
               <Section title="Branches">
                 <div className="drow dhead"><span className="dk" /><span className="dv" style={{ color: cA }}>A</span><span className="dv" style={{ color: cB }}>B</span></div>
                 <DiffRow k={world.meta.metric || 'Score'} a={nodeA.score} b={nodeB.score} lowerBetter={!isMaximize(world)} />
-                <DiffRow k="vs baseline" a={nodeA.score - world.meta.baseline} b={nodeB.score - world.meta.baseline} f={(x) => (x > 0 ? '+' : '') + fmt(x)} lowerBetter={false} />
+                <DiffRow k="vs baseline" a={nodeA.score - world.meta.baseline} b={nodeB.score - world.meta.baseline} f={(x) => (Number(x) > 0 ? '+' : '') + fmt(x)} lowerBetter={false} />
                 <DiffRow k="Generation" a={nodeA.gen} b={nodeB.gen} neutral />
                 <DiffRow k="Family" a={nodeA.family} b={nodeB.family} f={(x) => String(x || '—').replace(/_/g, ' ')} neutral />
-                <DiffRow k="Semantic" a={nodeA.semantic || '—'} b={nodeB.semantic || '—'} f={(x) => x} neutral />
+                <DiffRow k="Semantic" a={nodeA.semantic || '—'} b={nodeB.semantic || '—'} f={(x) => String(x)} neutral />
               </Section>
               <Section title="Where they diverge">
                 <div className="div-note">shared ancestor <span className="mono" style={{ color: 'var(--ink)' }}>{div.id}</span> at gen <b>{div.gen}</b></div>

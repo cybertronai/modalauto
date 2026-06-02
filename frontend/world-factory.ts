@@ -1,7 +1,7 @@
 (function () {
-  function appWorld(payload) {
+  function appWorld(payload: ResearchWorld): ResearchWorld {
     const maximize = String(payload.meta.direction || 'minimize').toLowerCase() === 'maximize';
-    function statusAt(n, T) {
+    function statusAt(n: ResearchNode, T: number): NodeStatus {
       if (T < n.tProposed) return 'unborn';
       if (n.abandoned) return T > n.tProposed + 18 ? 'abandoned' : 'queued';
       if (n.tClaimed == null || T < n.tClaimed) return 'queued';
@@ -9,11 +9,14 @@
       if (n.tVerified == null || T < n.tVerified) return 'submitted';
       return n.outcome === 'accept' ? 'verified' : 'rejected';
     }
-    function bornCount(T) {
+    function bornCount(T: number): number {
       return payload.nodes.filter((n) => n.tVerified != null && n.tVerified <= T).length;
     }
-    function frontierAt(T) {
-      let best = null;
+    function eventCount(T: number): number {
+      return payload.events.filter((e) => e.t <= T).length;
+    }
+    function frontierAt(T: number): number | null {
+      let best: number | null = null;
       payload.nodes.forEach((n) => {
         if (n.outcome === 'accept' && n.score != null && n.tVerified != null && n.tVerified <= T) {
           best = best == null ? n.score : (maximize ? Math.max(best, n.score) : Math.min(best, n.score));
@@ -21,18 +24,19 @@
       });
       return best;
     }
-    function fitBin(score) {
+    function fitBin(score: number | null | undefined): number | null {
       if (score == null) return null;
-      const best = payload.meta.best == null ? payload.meta.baseline : payload.meta.best;
+      const baseline = typeof payload.meta.baseline === 'number' ? payload.meta.baseline : 0;
+      const best = typeof payload.meta.best === 'number' ? payload.meta.best : baseline;
       if (maximize) {
-        const span = Math.max(1e-9, best - payload.meta.baseline);
-        return Math.max(0, Math.min(6, Math.round(((score - payload.meta.baseline) / span) * 6)));
+        const span = Math.max(1e-9, best - baseline);
+        return Math.max(0, Math.min(6, Math.round(((score - baseline) / span) * 6)));
       }
-      const span = Math.max(1e-9, payload.meta.baseline - best);
-      return Math.max(0, Math.min(6, Math.round(((payload.meta.baseline - score) / span) * 6)));
+      const span = Math.max(1e-9, baseline - best);
+      return Math.max(0, Math.min(6, Math.round(((baseline - score) / span) * 6)));
     }
-    function agentActivity(T) {
-      const out = {};
+    function agentActivity(T: number): Record<string, AgentActivity> {
+      const out: Record<string, AgentActivity> = {};
       payload.agents.forEach((a) => {
         const alive = a.spawnedAt <= T && (a.retiredAt == null || a.retiredAt > T);
         out[a.id] = { id: a.id, role: a.role, alive, status: 'idle', item: null, kind: null };
@@ -57,7 +61,7 @@
       });
       return out;
     }
-    payload.fns = { statusAt, bornCount, agentActivity, frontierAt, fitBin };
+    payload.fns = { statusAt, bornCount, eventCount, agentActivity, frontierAt, fitBin };
     return payload;
   }
   window.appWorld = appWorld;

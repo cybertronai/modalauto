@@ -4,9 +4,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Autoresearch — compare branches</title>
-<link rel="stylesheet" href="tokens.css?v=dev-20260530i" />
-<link rel="stylesheet" href="layout.css?v=dev-20260530i" />
-<link rel="stylesheet" href="compare.css?v=dev-20260530j" />
+<link rel="stylesheet" href="tokens.css?v=dev-20260602e" />
+<link rel="stylesheet" href="layout.css?v=dev-20260602e" />
+<link rel="stylesheet" href="compare.css?v=dev-20260602e" />
 <style> #root { height: 100vh; } </style>
 </head>
 <body>
@@ -19,15 +19,21 @@
 <!-- Shared world factory (same as the dashboard), then real data first; the
      mock files below are the static fallback and only fill in what the live
      journals didn't provide. -->
-<script src="world-factory.js?v=dev-20260530i"></script>
-<script src="real-data.js?v=dev-20260530i"></script>
-<script src="live-refresh.js?v=dev-20260530k"></script>
-<script src="data.js?v=dev-20260530i"></script>
-<script src="real-runs.js?v=dev-20260530i"></script>
-<script src="runs.js?v=dev-20260530i"></script>
-<script type="text/babel" src="/experiments/matmul/frontend/playback.jsx?v=dev-20260530l"></script>
-<script type="text/babel" src="/experiments/matmul/frontend/index.jsx?v=dev-20260530l"></script>
-<script type="text/babel" src="/experiments/evogym_walker/frontend/index.jsx?v=dev-20260530l"></script>
-<script type="text/babel" src="compare.jsx?v=dev-20260530l"></script>
+<script type="text/babel" data-presets="typescript" src="world-factory.ts?v=dev-20260602e"></script>
+<script type="text/babel" data-presets="typescript" src="shared.ts?v=dev-20260602e"></script>
+<script>
+  {
+    const task = new URLSearchParams(location.search).get('journal') || localStorage.getItem('autoresearch-task') || '';
+    document.write('<script src="real-data.js?journal=' + encodeURIComponent(task) + '&v=dev-20260602e"><\\/script>');
+  }
+</script>
+<script type="text/babel" data-presets="typescript" src="live-refresh.ts?v=dev-20260602e"></script>
+<script src="data.js?v=dev-20260602e"></script>
+<script src="real-runs.js?v=dev-20260602e"></script>
+<script src="runs.js?v=dev-20260602e"></script>
+<script type="text/babel" src="/experiments/matmul/frontend/playback.jsx?v=dev-20260602e"></script>
+<script type="text/babel" src="/experiments/matmul/frontend/index.jsx?v=dev-20260602e"></script>
+<script type="text/babel" src="/experiments/evogym_walker/frontend/index.jsx?v=dev-20260602e"></script>
+<script type="text/babel" data-presets="typescript,react" src="compare.tsx?v=dev-20260602e"></script>
 </body>
 </html>

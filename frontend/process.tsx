@@ -5,13 +5,10 @@
   const ROLE_LABEL = { topline_manager: 'manager', meta_agent: 'meta', insight_generator: 'insight', creative_explorer: 'explorer', global_searcher: 'searcher', researcher: 'researcher', implementor: 'implementor', verifier: 'verifier' };
   const ROLE_VAR = { topline_manager: '--role-manager', meta_agent: '--role-meta', insight_generator: '--role-insight', creative_explorer: '--role-explorer', global_searcher: '--role-searcher', researcher: '--role-researcher', implementor: '--role-implementor', verifier: '--role-verifier' };
   const roleCol = (r) => `var(${ROLE_VAR[r] || '--ink-3'})`;
-  const fmt = (n) => n == null ? '-' : typeof n === 'number' ? n.toLocaleString(undefined, { maximumFractionDigits: Number.isInteger(n) ? 0 : 3 }) : String(n);
+  const roleStyle = (role): CSSVars => ({ '--role': roleCol(role) });
+  const fmt = (n) => n == null ? '-' : window.AutoresearchUI.fmt(n);
   const finiteTime = (t, fallback = 0) => (typeof t === 'number' && Number.isFinite(t) ? t : fallback);
-  const mmss = (t) => {
-    const safe = Math.max(0, finiteTime(t));
-    const total = Math.round(safe);
-    return String(Math.floor(total / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
-  };
+  const mmss = window.AutoresearchUI.mmss;
 
   function Logo() {
     return (
@@ -31,7 +28,7 @@
         <div className="proc-stage-num mono">{id}</div>
         <div className="proc-stage-main">
           <div className="proc-stage-title">{title}</div>
-          <div className="proc-role-row">{roles.map((r) => <span key={r} className="role-chip" style={{ '--role': roleCol(r) }}><span className="glyph" />{ROLE_LABEL[r]}</span>)}</div>
+          <div className="proc-role-row">{roles.map((r) => <span key={r} className="role-chip" style={roleStyle(r)}><span className="glyph" />{ROLE_LABEL[r]}</span>)}</div>
           <div className="proc-stage-detail">{detail}</div>
         </div>
         <div className="proc-stage-stat"><span className="mono">{fmt(count)}</span><span>{active}</span></div>

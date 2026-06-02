@@ -1,31 +1,18 @@
 (function () {
+  const UI = window.AutoresearchUI;
   const params = new URLSearchParams(window.location.search);
   if (params.get('live') === '0') return;
 
   let inFlight = false;
-  let lastHash = null;
+  let lastHash: string | null = null;
   let lastFetchAt = 0;
-  let events = null;
-  let eventsTask = null;
+  let events: EventSource | null = null;
+  let eventsTask: string | null = null;
 
-  function currentTask() {
-    return window.__AUTORESEARCH_JOURNAL
-      || new URLSearchParams(window.location.search).get('journal')
-      || localStorage.getItem('autoresearch-task')
-      || '';
-  }
-
-  function apiUrl(path, task, extra) {
-    const base = (window.FRONTEND_API_URL || '').replace(/\/$/, '');
-    const url = new URL(base + path, window.location.origin);
-    if (task) url.searchParams.set('journal', task);
-    Object.entries(extra || {}).forEach(([key, value]) => url.searchParams.set(key, value));
-    return base ? url.toString() : url.pathname + url.search;
-  }
-
-  function applyPayload(data) {
+  function applyPayload(data: any): void {
     if (!data || !data.payload) return;
-    if (data.hash && data.hash === lastHash) return;
+    const activeAgents = Number(data.payload.meta && data.payload.meta.activeAgents || 0);
+    if (data.hash && data.hash === lastHash && activeAgents <= 0) return;
     if (data.hash) lastHash = data.hash;
     if (window.__AUTORESEARCH_APPLY_PAYLOAD) {
       window.__AUTORESEARCH_APPLY_PAYLOAD(data.payload, data);
@@ -36,13 +23,13 @@
     window.dispatchEvent(new CustomEvent('autoresearch-refresh', { detail: data }));
   }
 
-  async function check(force) {
+  async function check(force?: boolean): Promise<void> {
     if (inFlight) return;
     if (!force && Date.now() - lastFetchAt < 2500) return;
     inFlight = true;
     lastFetchAt = Date.now();
     try {
-      const res = await fetch(apiUrl('/api/data', currentTask(), { ts: Date.now() }), { cache: 'no-store' });
+      const res = await fetch(UI.apiUrl('/api/data', UI.currentTask(), { ts: Date.now() }), { cache: 'no-store' });
       if (!res.ok) return;
       applyPayload(await res.json());
     } catch (_) {
@@ -52,13 +39,13 @@
     }
   }
 
-  function connectEvents() {
+  function connectEvents(): void {
     if (!('EventSource' in window) || params.get('sse') === '0') return;
-    const task = currentTask();
+    const task = UI.currentTask();
     if (events && eventsTask === task) return;
     if (events) events.close();
     try {
-      events = new EventSource(apiUrl('/api/events', task));
+      events = new EventSource(UI.apiUrl('/api/events', task));
       eventsTask = task;
       events.addEventListener('change', () => check(true));
       events.addEventListener('missing', () => check(true));

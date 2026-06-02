@@ -87,14 +87,14 @@ image = (
     .env(MUJOCO_ENV)
     .run_commands("/opt/mae/bin/python - <<'PY'\nimport mujoco_py\nprint('mujoco_py precompiled')\nPY")
     .run_commands("python - <<'PY'\nimport mujoco, mujoco_warp, warp\nprint('mjwarp import ok')\nPY")
-    .add_local_dir(ROOT, str(REMOTE_ROOT), copy=True, ignore=ignore_runtime_paths)
-    .add_local_dir(WORLDGEN, str(REMOTE_WORLDGEN), copy=True)
+    .add_local_dir(ROOT, str(REMOTE_ROOT), ignore=ignore_runtime_paths)
+    .add_local_dir(WORLDGEN, str(REMOTE_WORLDGEN))
 )
 
 app = modal.App("openai-hide-and-seek-mjwarp", image=image)
 
 
-@app.function(timeout=1800, cpu=8, memory=16384, gpu="A10G")
+@app.function(timeout=1800, cpu=8, memory=16384, gpu="A10G", scaledown_window=900)
 def smoke_mjwarp(
     env_jsonnet: str = "examples/hide_and_seek_quadrant.jsonnet",
     seed: int = 0,
@@ -135,17 +135,21 @@ def smoke_mjwarp(
     return result_path.read_text()
 
 
-@app.function(timeout=3600, cpu=8, memory=24576, gpu="A10G")
-def train_smoke_mjwarp(
+def run_train_subprocess(
     env_jsonnet: str = "examples/hide_and_seek_quadrant.jsonnet",
     seed: int = 0,
     worlds: int = 64,
     updates: int = 4,
     horizon: int = 32,
+    lr: float = 3e-4,
+    entropy_coef: float = 0.01,
+    hidden: int = 64,
+    prep_fraction: float = 0.4,
 ) -> dict[str, str]:
     state_path = REMOTE_ROOT / "mjcf_state.json"
     result_path = REMOTE_ROOT / "mjwarp_train_smoke.json"
     ckpt_path = REMOTE_ROOT / "mjwarp_smoke_policy.pt"
+    rollout_path = REMOTE_ROOT / "mjwarp_policy_rollout.json"
 
     export_cmd = [
         LEGACY_PYTHON,
@@ -170,16 +174,127 @@ def train_smoke_mjwarp(
         str(updates),
         "--horizon",
         str(horizon),
+        "--lr",
+        str(lr),
+        "--entropy-coef",
+        str(entropy_coef),
+        "--hidden",
+        str(hidden),
+        "--prep-fraction",
+        str(prep_fraction),
         "--out",
         str(result_path),
         "--checkpoint",
         str(ckpt_path),
+        "--rollout-out",
+        str(rollout_path),
     ]
-    subprocess.run(train_cmd, cwd=str(REMOTE_ROOT), check=True)
+    proc = subprocess.run(train_cmd, cwd=str(REMOTE_ROOT), text=True, capture_output=True)
+    (REMOTE_ROOT / "mjwarp_train_stdout.log").write_text(proc.stdout or "")
+    (REMOTE_ROOT / "mjwarp_train_stderr.log").write_text(proc.stderr or "")
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "training subprocess failed with code {}\nSTDOUT:\n{}\nSTDERR:\n{}".format(
+                proc.returncode,
+                (proc.stdout or "")[-8000:],
+                (proc.stderr or "")[-8000:],
+            )
+        )
     return {
         "result": result_path.read_text(),
         "checkpoint_bytes_b64": __import__("base64").b64encode(ckpt_path.read_bytes()).decode("ascii"),
+        "rollout": rollout_path.read_text() if rollout_path.exists() else "",
     }
+
+
+@app.function(timeout=3600, cpu=8, memory=24576, gpu="A10G", scaledown_window=600)
+def train_smoke_mjwarp(
+    env_jsonnet: str = "examples/hide_and_seek_quadrant.jsonnet",
+    seed: int = 0,
+    worlds: int = 64,
+    updates: int = 4,
+    horizon: int = 32,
+    lr: float = 3e-4,
+    entropy_coef: float = 0.01,
+    hidden: int = 64,
+    prep_fraction: float = 0.4,
+) -> dict[str, str]:
+    return run_train_subprocess(env_jsonnet, seed, worlds, updates, horizon, lr, entropy_coef, hidden, prep_fraction)
+
+
+@app.function(timeout=3600, cpu=16, memory=49152, gpu="H100", min_containers=1, max_containers=4, scaledown_window=1800)
+def train_smoke_mjwarp_h100(
+    env_jsonnet: str = "examples/hide_and_seek_quadrant.jsonnet",
+    seed: int = 0,
+    worlds: int = 256,
+    updates: int = 8,
+    horizon: int = 64,
+    lr: float = 3e-4,
+    entropy_coef: float = 0.01,
+    hidden: int = 64,
+    prep_fraction: float = 0.4,
+) -> dict[str, str]:
+    return run_train_subprocess(env_jsonnet, seed, worlds, updates, horizon, lr, entropy_coef, hidden, prep_fraction)
+
+
+@app.function(timeout=3600, cpu=16, memory=49152, gpu="H100", min_containers=1, max_containers=4, scaledown_window=1800)
+def train_smoke_mjwarp_h100_v2(
+    env_jsonnet: str = "examples/hide_and_seek_quadrant.jsonnet",
+    seed: int = 0,
+    worlds: int = 256,
+    updates: int = 8,
+    horizon: int = 64,
+    lr: float = 3e-4,
+    entropy_coef: float = 0.01,
+    hidden: int = 64,
+    prep_fraction: float = 0.4,
+) -> dict[str, str]:
+    return run_train_subprocess(env_jsonnet, seed, worlds, updates, horizon, lr, entropy_coef, hidden, prep_fraction)
+
+
+@app.function(timeout=3600, cpu=16, memory=49152, gpu="H100", min_containers=1, max_containers=4, scaledown_window=1800)
+def train_smoke_mjwarp_h100_v3(
+    env_jsonnet: str = "examples/hide_and_seek_quadrant.jsonnet",
+    seed: int = 0,
+    worlds: int = 256,
+    updates: int = 6,
+    horizon: int = 64,
+    lr: float = 3e-4,
+    entropy_coef: float = 0.01,
+    hidden: int = 64,
+    prep_fraction: float = 0.4,
+) -> dict[str, str]:
+    return run_train_subprocess(env_jsonnet, seed, worlds, updates, horizon, lr, entropy_coef, hidden, prep_fraction)
+
+
+@app.function(timeout=3600, cpu=16, memory=49152, gpu="H100", min_containers=1, max_containers=4, scaledown_window=1800)
+def train_smoke_mjwarp_h100_v4(
+    env_jsonnet: str = "examples/hide_and_seek_quadrant.jsonnet",
+    seed: int = 0,
+    worlds: int = 256,
+    updates: int = 6,
+    horizon: int = 64,
+    lr: float = 3e-4,
+    entropy_coef: float = 0.01,
+    hidden: int = 64,
+    prep_fraction: float = 0.4,
+) -> dict[str, str]:
+    return run_train_subprocess(env_jsonnet, seed, worlds, updates, horizon, lr, entropy_coef, hidden, prep_fraction)
+
+
+@app.function(timeout=3600, cpu=16, memory=98304, gpu="H200", max_containers=2, scaledown_window=1800)
+def train_smoke_mjwarp_h200(
+    env_jsonnet: str = "examples/hide_and_seek_quadrant.jsonnet",
+    seed: int = 0,
+    worlds: int = 1024,
+    updates: int = 8,
+    horizon: int = 64,
+    lr: float = 3e-4,
+    entropy_coef: float = 0.01,
+    hidden: int = 64,
+    prep_fraction: float = 0.4,
+) -> dict[str, str]:
+    return run_train_subprocess(env_jsonnet, seed, worlds, updates, horizon, lr, entropy_coef, hidden, prep_fraction)
 
 
 @app.local_entrypoint()
@@ -197,6 +312,18 @@ def main(
 ):
     if mode == "train":
         payload = train_smoke_mjwarp.remote(env_jsonnet, seed, worlds, updates, horizon)
+        parsed = json.loads(payload["result"])
+        ckpt_path = ROOT / checkpoint
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        ckpt_path.write_bytes(__import__("base64").b64decode(payload["checkpoint_bytes_b64"]))
+    elif mode == "train-h100":
+        payload = train_smoke_mjwarp_h100.remote(env_jsonnet, seed, worlds, updates, horizon)
+        parsed = json.loads(payload["result"])
+        ckpt_path = ROOT / checkpoint
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        ckpt_path.write_bytes(__import__("base64").b64decode(payload["checkpoint_bytes_b64"]))
+    elif mode == "train-h200":
+        payload = train_smoke_mjwarp_h200.remote(env_jsonnet, seed, worlds, updates, horizon)
         parsed = json.loads(payload["result"])
         ckpt_path = ROOT / checkpoint
         ckpt_path.parent.mkdir(parents=True, exist_ok=True)

@@ -296,6 +296,8 @@ html, body {
 .btn:hover { background: var(--surface-2); color: var(--ink); }
 .btn.primary { background: var(--accent); border-color: var(--accent-deep); color: #fff; }
 .btn.primary:hover { background: var(--accent-deep); color: #fff; }
+.btn.danger { border-color: color-mix(in oklch, var(--bad) 45%, var(--line)); color: var(--bad); }
+.btn.danger:hover { background: color-mix(in oklch, var(--bad) 10%, var(--surface-0)); color: var(--bad); }
 .btn.icon { width: 32px; padding: 0; justify-content: center; }
 
 /* ---- Stat tile ---- */

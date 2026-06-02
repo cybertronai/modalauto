@@ -425,7 +425,10 @@ const replayBoxes = [boxA, boxB, boxC];
 const replayRamps = [rampDefense, ramp];
 boxC.visible = false;
 
-fetch('/rollouts/hide_and_seek_quadrant_seed0.json')
+const params = new URLSearchParams(window.location.search);
+const rolloutUrl = params.get('rollout') || '/rollouts/hide_and_seek_quadrant_seed0.json';
+
+fetch(rolloutUrl)
   .then((res) => {
     if (!res.ok) throw new Error(`rollout HTTP ${res.status}`);
     return res.json();
@@ -518,9 +521,32 @@ function materialFromRgba(rgba, fallback) {
 }
 
 function buildSimStatic(model) {
-  if (!model || !Array.isArray(model.geoms)) return;
   approximateStatic.forEach((mesh) => { mesh.visible = false; });
   simStatic.clear();
+  if (!model || !Array.isArray(model.geoms) || model.geoms.length === 0) {
+    const wallH = 0.95;
+    const wallT = 0.18;
+    const arena = 6.0;
+    const floorMesh = shadow(new THREE.Mesh(new THREE.BoxGeometry(arena, 0.12, arena), materials.floor));
+    floorMesh.position.set(0, -0.06, 0);
+    simStatic.add(floorMesh);
+    const walls = [
+      { x: 0, z: -arena / 2, w: arena, d: wallT },
+      { x: 0, z: arena / 2, w: arena, d: wallT },
+      { x: -arena / 2, z: 0, w: wallT, d: arena },
+      { x: arena / 2, z: 0, w: wallT, d: arena },
+      { x: -0.92, z: -1.0, w: wallT, d: 3.55 },
+      { x: 1.2, z: 0.85, w: 3.25, d: wallT },
+      { x: -0.48, z: 0.82, w: 0.9, d: wallT },
+      { x: 0.45, z: -0.55, w: wallT, d: 1.05 },
+    ];
+    for (const wall of walls) {
+      const mesh = shadow(new THREE.Mesh(new THREE.BoxGeometry(wall.w, wallH, wall.d), materials.wall));
+      mesh.position.set(wall.x, wallH / 2, wall.z);
+      simStatic.add(mesh);
+    }
+    return;
+  }
 
   for (const geom of model.geoms) {
     if (geom.name === 'floor0') {

@@ -1,6 +1,7 @@
 /* Autoresearch app — header + evotree + live agent rail + inspector + time scrubber. */
 (function () {
   const { useState, useEffect, useRef, useMemo, useCallback } = React;
+  const UI = window.AutoresearchUI;
   let E = null;
 
   const ACCENTS = {
@@ -19,29 +20,13 @@
     "showFeed": true
   }/*EDITMODE-END*/;
 
-  const fmt = (n) => {
-    if (n == null) return '—';
-    if (typeof n !== 'number') return String(n);
-    if (!Number.isFinite(n)) return String(n);
-    const abs = Math.abs(n);
-    const maximumFractionDigits = Number.isInteger(n) ? 0 : abs >= 100 ? 2 : abs >= 1 ? 3 : 4;
-    return n.toLocaleString(undefined, { maximumFractionDigits });
-  };
+  const fmt = UI.fmt;
   const finiteTime = (t, fallback = 0) => (typeof t === 'number' && Number.isFinite(t) ? t : fallback);
-  const mmss = (t) => {
-    const safe = Math.max(0, finiteTime(t));
-    const total = Math.round(safe);
-    return String(Math.floor(total / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
-  };
+  const mmss = UI.mmss;
   const directionLabel = () => String((E && E.meta && E.meta.direction) || 'minimize').toLowerCase() === 'maximize' ? 'maximize' : 'minimize';
-  const initialTask = () => new URLSearchParams(window.location.search).get('journal') || localStorage.getItem('autoresearch-task') || '';
-  const apiUrl = (path, task, params) => {
-    const base = (window.FRONTEND_API_URL || '').replace(/\/$/, '');
-    const url = new URL(base + path, window.location.origin);
-    if (task) url.searchParams.set('journal', task);
-    Object.entries(params || {}).forEach(([k, v]) => url.searchParams.set(k, v));
-    return base ? url.toString() : url.pathname + url.search;
-  };
+  const initialTask = UI.currentTask;
+  const initialNode = () => UI.queryParam('node');
+  const apiUrl = UI.apiUrl;
 
   function Logo() {
     return (
@@ -108,8 +93,8 @@
   function TaskSelect({ tasks, value, onChange }) {
     if (!tasks.length) return null;
     return (
-      <label className="task-select" title="Select autoresearch task">
-        <span>Task</span>
+      <label className="task-select" title="Select autoresearch journal">
+        <span>Journal</span>
         <select value={value || ''} onChange={(e) => onChange(e.target.value)}>
           {tasks.map((task) => <option key={task.id} value={task.id}>{task.label}</option>)}
         </select>
@@ -117,11 +102,45 @@
     );
   }
 
-  function Scrubber({ T, setT, playing, setPlaying, speed, setSpeed }) {
+  function Scrubber({ T, setT, playing, setPlaying, speed, setSpeed, onStopRun, stopStatus }) {
     const trackRef = useRef(null);
     const dragging = useRef(false);
-    const empty = E.meta.totalNodes === 0;
-    const live = T >= E.meta.tNow - 1;
+    const eventCount = E.fns.eventCount ? E.fns.eventCount(T) : E.events.filter((e) => e.t <= T).length;
+    const totalEvents = E.events.length;
+    const timelineMax = Math.max(1, finiteTime(E.meta.tMax, 0), finiteTime(E.meta.tNow, 0));
+    const activeRun = E.meta.activeAgents == null
+      ? E.agents.some((a) => String(a.status || '').toLowerCase() !== 'dead' && a.retiredAt == null)
+      : Number(E.meta.activeAgents || 0) > 0;
+    const empty = E.meta.totalNodes === 0 && totalEvents === 0 && E.agents.length === 0;
+    const atNow = T >= finiteTime(E.meta.tNow, 0) - 1;
+    const sparkPath = useMemo(() => {
+      const s = E.series;
+      const maximize = directionLabel() === 'maximize';
+      const values = [E.meta.baseline, E.meta.target].concat(s.map((p) => p.best)).filter((v) => typeof v === 'number' && Number.isFinite(v));
+      const lo = values.length ? Math.min(...values) : 0;
+      const hi = values.length ? Math.max(...values) : 1;
+      const span = Math.max(1e-9, hi - lo);
+      return s.map((p, i) => {
+        const x = (p.t / timelineMax) * 100;
+        const better = p.best == null ? 0 : maximize ? (p.best - lo) / span : (hi - p.best) / span;
+        const y = p.best == null ? 92 : 92 - Math.max(0, Math.min(1, better)) * 84;
+        return (i === 0 ? 'M' : 'L') + x.toFixed(2) + ' ' + y.toFixed(2);
+      }).join(' ');
+    }, [E.series, E.meta.baseline, E.meta.target, E.meta.direction, timelineMax]);
+    const sparkFill = sparkPath ? sparkPath + ` L 100 100 L 0 100 Z` : '';
+
+    const setFromX = (clientX) => {
+      if (!trackRef.current) return;
+      const r = trackRef.current.getBoundingClientRect();
+      const f = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+      setT(f * timelineMax); setPlaying(false);
+    };
+    const down = (e) => { dragging.current = true; setFromX(e.clientX); };
+    const move = (e) => { if (dragging.current) setFromX(e.clientX); };
+    const up = () => { dragging.current = false; };
+    useEffect(() => { window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+      return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); }; }, []);
+
     if (empty) {
       return (
         <div className="scrubber scrubber-empty">
@@ -129,7 +148,7 @@
             ●<span>Live</span></button>
           <div className="scrub-track-wrap">
             <div className="scrub-time mono">
-              <span>Step 0 (00:00)</span>
+              <span>{'Events ' + eventCount + ' (' + mmss(finiteTime(E.meta.tNow, T)) + ')'}</span>
               <span className="live-tag">● LIVE</span>
             </div>
             <div className="scrub-empty-track">waiting for first run</div>
@@ -139,52 +158,43 @@
       );
     }
 
-    const sparkPath = useMemo(() => {
-      const s = E.series;
-      const maximize = directionLabel() === 'maximize';
-      const values = [E.meta.baseline, E.meta.target].concat(s.map((p) => p.best)).filter((v) => typeof v === 'number' && Number.isFinite(v));
-      const lo = values.length ? Math.min(...values) : 0;
-      const hi = values.length ? Math.max(...values) : 1;
-      const span = Math.max(1e-9, hi - lo);
-      return s.map((p, i) => {
-        const x = (p.t / E.meta.tMax) * 100;
-        const better = p.best == null ? 0 : maximize ? (p.best - lo) / span : (hi - p.best) / span;
-        const y = p.best == null ? 92 : 92 - Math.max(0, Math.min(1, better)) * 84;
-        return (i === 0 ? 'M' : 'L') + x.toFixed(2) + ' ' + y.toFixed(2);
-      }).join(' ');
-    }, [E.series, E.meta.baseline, E.meta.target, E.meta.direction, E.meta.tMax]);
-    const sparkFill = sparkPath + ` L 100 100 L 0 100 Z`;
-
-    const setFromX = (clientX) => {
-      const r = trackRef.current.getBoundingClientRect();
-      const f = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
-      setT(f * E.meta.tMax); setPlaying(false);
-    };
-    const down = (e) => { dragging.current = true; setFromX(e.clientX); };
-    const move = (e) => { if (dragging.current) setFromX(e.clientX); };
-    const up = () => { dragging.current = false; };
-    useEffect(() => { window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
-      return () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); }; }, []);
-
-    const pct = (T / E.meta.tMax) * 100;
+    const pct = (T / timelineMax) * 100;
     const bornNow = E.fns.bornCount(T);
-    const playLabel = playing ? 'Pause' : live ? 'Live' : 'Replay';
-    const playIcon = playing ? '❚❚' : live ? '●' : '▶';
+    const totalBorn = E.fns.bornCount(timelineMax);
+    const timelineLabel = bornNow > 0 ? 'Step ' + bornNow : 'Events ' + eventCount;
+    const playLabel = activeRun ? (stopStatus === 'stopping' ? 'Stopping' : 'Stop run') : playing ? 'Pause' : 'Replay';
+    const playIcon = activeRun ? '■' : playing ? '❚❚' : '▶';
+    const primaryClass = 'btn primary play-btn' + (activeRun ? ' danger-live' : '');
+    const primaryClick = () => {
+      if (activeRun) {
+        onStopRun();
+        return;
+      }
+      if (playing) {
+        setPlaying(false);
+        return;
+      }
+      if (atNow) setT(0);
+      setPlaying(true);
+    };
 
     return (
       <div className="scrubber">
-        <button className="btn primary play-btn" onClick={() => setPlaying((p) => !p)}>
+        <button className={primaryClass} onClick={primaryClick} disabled={stopStatus === 'stopping'}>
           {playIcon}<span>{playLabel}</span></button>
         <div className="scrub-track-wrap">
           <div className="scrub-time mono">
-            <span>{'Step ' + bornNow + ' (' + mmss(T) + ')'}</span>
-            {live ? <span className="live-tag">● LIVE</span> : <span className="mono scrub-of">{' of ' + E.fns.bornCount(E.meta.tMax) + ' (' + mmss(E.meta.tMax) + ')'}</span>}
+            <span>{timelineLabel + ' (' + mmss(T) + ')'}</span>
+            {activeRun ? <span className="live-tag">● LIVE</span> : <span className="mono scrub-of">{' of ' + (totalBorn > 0 ? totalBorn + ' steps' : totalEvents + ' events') + ' (' + mmss(timelineMax) + ')'}</span>}
+            {stopStatus && stopStatus !== 'stopping' ? <span className="run-control-status">{stopStatus}</span> : null}
           </div>
           <div className="scrub-track" ref={trackRef} onPointerDown={down}>
-            <svg className="spark" viewBox="0 0 100 100" preserveAspectRatio="none">
-              <path d={sparkFill} fill="var(--accent-soft)" />
-              <path d={sparkPath} fill="none" stroke="var(--accent)" strokeWidth={1.2} vectorEffect="non-scaling-stroke" />
-            </svg>
+            {sparkPath ? (
+              <svg className="spark" viewBox="0 0 100 100" preserveAspectRatio="none">
+                <path d={sparkFill} fill="var(--accent-soft)" />
+                <path d={sparkPath} fill="none" stroke="var(--accent)" strokeWidth={1.2} vectorEffect="non-scaling-stroke" />
+              </svg>
+            ) : null}
             <div className="scrub-done" style={{ width: pct + '%' }} />
             <div className="scrub-head" style={{ left: pct + '%' }} />
           </div>
@@ -193,7 +203,7 @@
           <div className="speed-seg">
             {[1, 2, 4].map((s) => <button key={s} className={'speed-btn' + (speed === s ? ' on' : '')} onClick={() => setSpeed(s)}>{s + '×'}</button>)}
           </div>
-          <button className={'btn jump-btn' + (live ? ' on' : '')} onClick={() => { setT(E.meta.tNow); setPlaying(false); }}>Jump to now</button>
+          <button className={'btn jump-btn' + (atNow ? ' on' : '')} onClick={() => { setT(finiteTime(E.meta.tNow, timelineMax)); setPlaying(false); }}>Jump to now</button>
         </div>
       </div>
     );
@@ -217,10 +227,11 @@
     const [T, setT] = useState(E ? E.meta.tNow : 0);
     const [playing, setPlaying] = useState(false);
     const [speed, setSpeed] = useState(t.speed || 1);
-    const [selected, setSelected] = useState(null);
+    const [selected, setSelected] = useState(initialNode() || null);
     const [branchSelection, setBranchSelection] = useState([]);
     const [currentTask, setCurrentTask] = useState(initialTask());
     const [tasks, setTasks] = useState([]);
+    const [stopStatus, setStopStatus] = useState('');
 
     useEffect(() => {
       worldRef.current = world;
@@ -233,8 +244,10 @@
       const url = new URL(window.location.href);
       if (currentTask) url.searchParams.set('journal', currentTask);
       else url.searchParams.delete('journal');
+      if (selected) url.searchParams.set('node', selected);
+      else url.searchParams.delete('node');
       window.history.replaceState(null, '', url.pathname + url.search + url.hash);
-    }, [currentTask]);
+    }, [currentTask, selected]);
 
     useEffect(() => {
       let stopped = false;
@@ -268,9 +281,39 @@
       setCurrentTask(task);
       setSelected(null);
       setBranchSelection([]);
+      setStopStatus('');
       setPlaying(false);
       loadTaskData(task);
     }, [loadTaskData]);
+
+    const stopRun = useCallback(async () => {
+      if (!currentTask) return;
+      setStopStatus('stopping');
+      try {
+        const res = await fetch(apiUrl('/api/control/stop-run', currentTask), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: 'Stopped from dashboard' }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) throw new Error(data.error || 'stop failed');
+        setStopStatus('stopped');
+        await loadTaskData(currentTask);
+      } catch (err) {
+        setStopStatus(err instanceof Error ? err.message : 'stop failed');
+      }
+    }, [currentTask, loadTaskData]);
+
+    useEffect(() => {
+      if (!currentTask) return;
+      let stopped = false;
+      async function refreshCurrentTask() {
+        if (stopped) return;
+        await loadTaskData(currentTask);
+      }
+      const id = setInterval(refreshCurrentTask, 3000);
+      return () => { stopped = true; clearInterval(id); };
+    }, [currentTask, loadTaskData]);
 
     useEffect(() => {
       window.__AUTORESEARCH_APPLY_PAYLOAD = (payload) => {
@@ -285,7 +328,12 @@
           const wasLive = !previous || cur >= previous.meta.tNow - 1;
           return wasLive ? next.meta.tNow : Math.min(cur, next.meta.tMax);
         });
-        setSelected((id) => id && next.nodes.some((n) => n.id === id) ? id : null);
+        setSelected((id) => {
+          if (id && next.nodes.some((n) => n.id === id)) return id;
+          const preferred = [...next.nodes].reverse().find((n) => n.id && n.id.startsWith('hs-final') && n.media && n.media.timelapse)
+            || [...next.nodes].reverse().find((n) => n.media && n.media.timelapse);
+          return preferred ? preferred.id : null;
+        });
         setBranchSelection((ids) => ids.filter((id) => next.nodes.some((n) => n.id === id)).slice(-2));
       };
       if (window.__AUTORESEARCH_PENDING_PAYLOAD) {
@@ -298,7 +346,7 @@
 
     // theme + accent
     useEffect(() => { if (t.theme === 'dark') document.documentElement.dataset.theme = 'dark'; else document.documentElement.removeAttribute('data-theme'); }, [t.theme]);
-    useEffect(() => { const a = ACCENTS[t.accent] || ACCENTS.blue; Object.entries(a).forEach(([k, v]) => document.documentElement.style.setProperty(k, v)); }, [t.accent]);
+    useEffect(() => { const a: Record<string, string> = ACCENTS[t.accent] || ACCENTS.blue; Object.entries(a).forEach(([k, v]) => document.documentElement.style.setProperty(k, v)); }, [t.accent]);
     useEffect(() => { document.documentElement.dataset.density = t.density; }, [t.density]);
     useEffect(() => { setSpeed(t.speed || 1); }, [t.speed]);
 
@@ -312,7 +360,7 @@
       return () => clearInterval(iv);
     }, [playing, speed]);
 
-    const onSelect = useCallback((id, opts = {}) => {
+    const onSelect = useCallback((id, opts: { shift?: boolean } = {}) => {
       setSelected(id);
       setBranchSelection((prev) => {
         if (!opts.shift) return [id];
@@ -373,7 +421,7 @@
         </div>
 
         <footer className="bottom">
-          <Scrubber T={T} setT={setT} playing={playing} setPlaying={setPlaying} speed={speed} setSpeed={setSpeed} />
+          <Scrubber T={T} setT={setT} playing={playing} setPlaying={setPlaying} speed={speed} setSpeed={setSpeed} onStopRun={stopRun} stopStatus={stopStatus} />
         </footer>
 
         {/* Tweaks */}
@@ -400,7 +448,6 @@
 
   async function loadLiveData() {
     try {
-      const base = window.FRONTEND_API_URL || '';
       const task = initialTask();
       const res = await fetch(apiUrl('/api/data', task, { ts: Date.now() }), { cache: 'no-store' });
       if (!res.ok) throw new Error('HTTP ' + res.status);

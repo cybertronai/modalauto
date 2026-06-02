@@ -10,8 +10,9 @@
   const ROLE_LABEL = { topline_manager: 'manager', meta_agent: 'meta', insight_generator: 'insight', creative_explorer: 'explorer', global_searcher: 'searcher', implementor: 'implementor', verifier: 'verifier', researcher: 'researcher' };
   const ROLE_VAR = { topline_manager: '--role-manager', meta_agent: '--role-meta', insight_generator: '--role-insight', creative_explorer: '--role-explorer', global_searcher: '--role-searcher', implementor: '--role-implementor', verifier: '--role-verifier', researcher: '--role-researcher' };
   const roleCol = (r) => `var(${ROLE_VAR[r]})`;
+  const roleStyle = (role): CSSVars => ({ '--role': roleCol(role) });
 
-  function Chevron({ className }) {
+  function Chevron({ className = '' }) {
     return (
       <svg className={'sb-chev ' + (className || '')} viewBox="0 0 16 16" fill="none">
         <path d="M5 6 L8 9.5 L11 6" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
@@ -35,7 +36,7 @@
   }
 
   function RolePill({ role }) {
-    return <span className="role-chip" style={{ '--role': roleCol(role) }}><span className="glyph" />{ROLE_LABEL[role]}</span>;
+    return <span className="role-chip" style={roleStyle(role)}><span className="glyph" />{ROLE_LABEL[role]}</span>;
   }
 
   // --- Team section ---
@@ -184,11 +185,7 @@
     );
   }
 
-  function mmss(t) {
-    const safe = typeof t === 'number' && Number.isFinite(t) ? Math.max(0, t) : 0;
-    const total = Math.round(safe);
-    return String(Math.floor(total / 60)).padStart(2, '0') + ':' + String(total % 60).padStart(2, '0');
-  }
+  const mmss = window.AutoresearchUI.mmss;
 
   Object.assign(window, { TeamPanel, HypothesesPanel, ActivityPanel, SBSection: Section, SBChevron: Chevron, SBRolePill: RolePill,
     EVO_ROLE_LABEL: ROLE_LABEL, EVO_ROLE_VAR: ROLE_VAR, evoRoleCol: roleCol, evoMMSS: mmss });

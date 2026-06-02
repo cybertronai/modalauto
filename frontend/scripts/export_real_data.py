@@ -403,8 +403,8 @@ def extract_media(context, summary, artifact_path, journal, hyp_id):
             "path": str(resolved) if resolved else path,
             "mime": item.get("mime") or item.get("type"),
         }
-    if "timelapse" not in out and artifact_dir:
-        for name in ("timelapse.gif", "preview.gif", "run.gif", "timelapse.mp4", "preview.webm"):
+    if artifact_dir:
+        for name in ("mujoco_3d.gif", "mujoco_3d.mp4", "timelapse.gif", "preview.gif", "run.gif", "timelapse.mp4", "preview.webm"):
             media_path = artifact_dir / name
             if media_path.exists():
                 out["timelapse"] = {
@@ -735,8 +735,11 @@ def build_payload(journal, db_filename=None):
         ev(seconds(row["created_at"], start), "scale", payload.get("agent_id") or "manager", None, row["kind"], payload=payload)
 
     events.sort(key=lambda e: (e["t"], e["kind"]))
-    t_max = max([e["t"] for e in events] + [0]) + 5
-    t_now = t_max
+    last_event_t = max([e["t"] for e in events] + [0])
+    wall_now_t = round((datetime.now(timezone.utc) - start).total_seconds(), 3)
+    active_agents = [a for a in agents if str(a.get("status") or "").lower() != "dead"]
+    t_now = max(last_event_t, wall_now_t) if active_agents else last_event_t
+    t_max = max(t_now, last_event_t + 5, 1)
 
     def frontier_at(t):
         b = None
@@ -762,6 +765,7 @@ def build_payload(journal, db_filename=None):
             "gap": gap,
             "tMax": t_max,
             "tNow": t_now,
+            "activeAgents": len(active_agents),
             "totalNodes": len(nodes),
             "excludedTreeItems": excluded_tree_items,
             "haltedBranches": len(halted_branches),
@@ -800,7 +804,8 @@ WORLD_FACTORY_JS = r"""
       if (n.tVerified == null || T < n.tVerified) return 'submitted';
       return n.outcome === 'accept' ? 'verified' : 'rejected';
     }
-    function bornCount(T) { return payload.nodes.filter((n) => n.tProposed <= T).length; }
+    function bornCount(T) { return payload.nodes.filter((n) => n.tVerified != null && n.tVerified <= T).length; }
+    function eventCount(T) { return payload.events.filter((e) => e.t <= T).length; }
     function frontierAt(T) {
       let best = null;
       payload.nodes.forEach((n) => {
@@ -846,7 +851,7 @@ WORLD_FACTORY_JS = r"""
       });
       return out;
     }
-    payload.fns = { statusAt, bornCount, agentActivity, frontierAt, fitBin };
+    payload.fns = { statusAt, bornCount, eventCount, agentActivity, frontierAt, fitBin };
     return payload;
   }
 """
@@ -865,7 +870,7 @@ def render_js(payload):
 def render_runs_js(runs):
     """runs: list of dicts {id, label, desc, payload}.
     Emits window.EVO_RUNS (each a full world) for the Compare page, mirroring
-    the mock runs.js shape so compare.jsx is data-source agnostic."""
+    the mock runs.js shape so compare.tsx is data-source agnostic."""
     items = []
     for r in runs:
         item = "    { id: __ID__, label: __LABEL__, desc: __DESC__, world: appWorld(__PAYLOAD__) }"

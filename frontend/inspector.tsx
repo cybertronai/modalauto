@@ -6,16 +6,10 @@
   window.addEventListener('autoresearch-world', () => { E = window.APP; });
   const Section = window.SBSection;
   const roleCol = window.evoRoleCol;
+  const roleStyle = (role): CSSVars => ({ '--role': roleCol(role) });
   const ROLE_LABEL = window.EVO_ROLE_LABEL;
   const mmss = window.evoMMSS;
-  const fmt = (n) => {
-    if (n == null) return '—';
-    if (typeof n !== 'number') return String(n);
-    if (!Number.isFinite(n)) return String(n);
-    const abs = Math.abs(n);
-    const maximumFractionDigits = Number.isInteger(n) ? 0 : abs >= 100 ? 2 : abs >= 1 ? 3 : 4;
-    return n.toLocaleString(undefined, { maximumFractionDigits });
-  };
+  const fmt = window.AutoresearchUI.fmt;
   const isMaximize = () => String((E.meta && E.meta.direction) || 'minimize').toLowerCase() === 'maximize';
 
   function statusPill(st) {
@@ -123,7 +117,7 @@
         <div className="voxel-legend">
           {Object.entries(legend).map(([k, v]) => (
             <span key={k} className="voxel-legend-item">
-              <span className={'voxel-swatch v' + k} />{v}
+              <span className={'voxel-swatch v' + k} />{String(v)}
             </span>
           ))}
         </div>
@@ -300,7 +294,7 @@
             <div className="insp-sub">
               <span className="insp-cand">{node.candidate}</span>
               <span className="insp-meta">{'gen ' + node.gen}</span>
-              <span className="role-chip" style={{ '--role': roleCol(node.proposerRole) }}>
+              <span className="role-chip" style={roleStyle(node.proposerRole)}>
                 <span className="glyph" />{ROLE_LABEL[node.proposerRole]}
               </span>
               <span className="insp-meta mono">{node.proposer}</span>

@@ -27,7 +27,7 @@ from typing import Any
 from autoresearch.backend import experiment_config
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = experiment_config.AUTORESEARCH_ROOT
 DEFAULT_DB = experiment_config.DEFAULT_RESEARCH_DB
 ARXIV_API = "https://export.arxiv.org/api/query"
 EMBED_DIMS = 384

@@ -9,8 +9,10 @@ manager's current scaling recommendation.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,7 +21,7 @@ from typing import Any
 from autoresearch.backend import experiment_config
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = experiment_config.AUTORESEARCH_ROOT
 DEFAULT_DB = experiment_config.DEFAULT_TEAM_DB
 DEFAULT_WORKTREE_ROOT = experiment_config.DEFAULT_WORKTREE_ROOT
 LEASE_SECONDS = 900
@@ -292,6 +294,355 @@ def row_counts(db: sqlite3.Connection, table: str, group_col: str) -> dict[str, 
     return {str(row["k"]): int(row["n"]) for row in rows}
 
 
+VOLATILE_CONTEXT_KEYS = {
+    "best_frontier",
+    "recent_best",
+    "recent_families",
+    "parent_source",
+}
+IDEA_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "because", "before", "by",
+    "for", "from", "has", "have", "if", "in", "into", "is", "it", "more",
+    "new", "of", "on", "or", "that", "the", "this", "to", "try", "use",
+    "when", "with", "without", "test",
+}
+IDEA_SYNONYMS = {
+    "cache": "reuse",
+    "cached": "reuse",
+    "caching": "reuse",
+    "hold": "reuse",
+    "holding": "reuse",
+    "reuse": "reuse",
+    "reusing": "reuse",
+    "alias": "alias",
+    "aliasing": "alias",
+    "packed": "pack",
+    "packing": "pack",
+    "scratch": "scratch",
+    "temporary": "scratch",
+    "temp": "scratch",
+    "tile": "tile",
+    "tiled": "tile",
+    "tiling": "tile",
+    "panel": "panel",
+    "panels": "panel",
+    "schedule": "schedule",
+    "schedules": "schedule",
+    "loop": "loop",
+    "loops": "loop",
+    "address": "address",
+    "addresses": "address",
+    "read": "read",
+    "reads": "read",
+    "repeated": "read",
+    "repeatedly": "read",
+    "low": "low",
+    "frontier": "frontier",
+    "plateau": "plateau",
+    "global": "global",
+    "meta": "meta",
+    "transfer": "transfer",
+    "recombine": "transfer",
+}
+
+
+def parse_json_object(raw: str | None) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def stable_context(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(k): stable_context(v)
+            for k, v in sorted(value.items())
+            if k not in VOLATILE_CONTEXT_KEYS
+        }
+    if isinstance(value, list):
+        return [stable_context(item) for item in value]
+    return value
+
+
+def normalized_title(title: str) -> str:
+    words = re.findall(r"[a-z0-9]+", title.lower())
+    return " ".join(idea_tokens(title))
+
+
+def idea_tokens(*values: Any) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            tokens.update(idea_tokens(*value.values()))
+            continue
+        if isinstance(value, list):
+            tokens.update(idea_tokens(*value))
+            continue
+        for raw in re.findall(r"[a-z0-9]+", str(value).lower()):
+            if raw in IDEA_STOPWORDS or len(raw) <= 1:
+                continue
+            tokens.add(IDEA_SYNONYMS.get(raw, raw))
+    return tokens
+
+
+def idea_token_set(title: str, rationale: str, expected_movement: str, context_json: str | dict[str, Any] | None) -> set[str]:
+    context = context_json if isinstance(context_json, dict) else parse_json_object(context_json)
+    implementation = context.get("implementation") if isinstance(context, dict) else {}
+    if not isinstance(implementation, dict):
+        implementation = {}
+    focused_impl = {
+        "operator": implementation.get("operator"),
+        "strategy": implementation.get("strategy"),
+        "tool_kind": implementation.get("tool_kind"),
+        "reuse_goal": implementation.get("reuse_goal"),
+        "low_address_roles": implementation.get("low_address_roles"),
+        "loop_order": implementation.get("loop_order"),
+        "evolution": context.get("evolution") if isinstance(context, dict) else None,
+    }
+    return idea_tokens(title, rationale, expected_movement, focused_impl)
+
+
+def idea_similarity(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def same_general_idea(a: set[str], b: set[str]) -> bool:
+    if not a or not b:
+        return False
+    overlap = a & b
+    core = {"reuse", "alias", "scratch", "tile", "panel", "schedule", "address", "transfer", "meta", "output", "dead"}
+    if len(overlap) >= 5 and idea_similarity(a, b) >= 0.34 and len(overlap & core) >= 2:
+        return True
+    return len(overlap & core) >= 3 and len(overlap) >= 6 and idea_similarity(a, b) >= 0.20
+
+
+def hypothesis_signature(title: str, context_json: str | dict[str, Any] | None) -> str:
+    context = context_json if isinstance(context_json, dict) else parse_json_object(context_json)
+    implementation = context.get("implementation") if isinstance(context, dict) else None
+    if isinstance(implementation, dict) and implementation:
+        payload = {
+            "implementation": stable_context(implementation),
+        }
+    else:
+        payload = {"title": normalized_title(title)}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def queued_hypothesis_signature(row: sqlite3.Row) -> str:
+    return hypothesis_signature(str(row["title"]), row["context_json"])
+
+
+def queued_hypothesis_idea(row: sqlite3.Row) -> set[str]:
+    return idea_token_set(
+        str(row["title"] or ""),
+        str(row["rationale"] or ""),
+        str(row["expected_movement"] or ""),
+        row["context_json"],
+    )
+
+
+def find_matching_hypothesis(db: sqlite3.Connection, signature: str, idea: set[str]) -> sqlite3.Row | None:
+    rows = db.execute(
+        """
+        SELECT *
+        FROM hypotheses
+        WHERE status IN ('queued', 'claimed', 'submitted', 'implemented')
+        ORDER BY
+            CASE status
+                WHEN 'queued' THEN 0
+                WHEN 'claimed' THEN 1
+                WHEN 'submitted' THEN 2
+                ELSE 3
+            END,
+            priority DESC,
+            created_at ASC
+        """
+    ).fetchall()
+    for row in rows:
+        if queued_hypothesis_signature(row) == signature:
+            return row
+    for row in rows:
+        if same_general_idea(queued_hypothesis_idea(row), idea):
+            return row
+    return None
+
+
+def merge_duplicate_hypothesis(
+    db: sqlite3.Connection,
+    existing: sqlite3.Row,
+    *,
+    proposer_agent_id: str | None,
+    priority: int,
+    rationale: str,
+    expected_movement: str,
+    context_json: str,
+    stamp: str,
+) -> dict[str, Any]:
+    context = parse_json_object(existing["context_json"])
+    duplicate = parse_json_object(context_json)
+    merged = context.setdefault("merged_duplicates", [])
+    if isinstance(merged, list):
+        merged.append({
+            "proposer_agent_id": proposer_agent_id,
+            "rationale": rationale,
+            "expected_movement": expected_movement,
+            "context": duplicate,
+            "merged_at": stamp,
+        })
+    if existing["status"] == "queued":
+        db.execute(
+            """
+            UPDATE hypotheses
+            SET priority = MAX(priority, ?),
+                rationale = CASE WHEN length(COALESCE(rationale, '')) >= length(?) THEN rationale ELSE ? END,
+                expected_movement = CASE WHEN length(COALESCE(expected_movement, '')) >= length(?) THEN expected_movement ELSE ? END,
+                context_json = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                priority,
+                rationale,
+                rationale,
+                expected_movement,
+                expected_movement,
+                json.dumps(context, sort_keys=True),
+                stamp,
+                existing["id"],
+            ),
+        )
+        status = "merged"
+    else:
+        status = "duplicate"
+    return {"hypothesis_id": existing["id"], "status": status}
+
+
+def hypothesis_backlog_cap(agent_counts: dict[str, int] | None = None) -> int:
+    agent_counts = agent_counts or {}
+    implementors = int(agent_counts.get("implementor", 0))
+    generators = (
+        int(agent_counts.get("creative_explorer", 0))
+        + int(agent_counts.get("global_searcher", 0))
+        + int(agent_counts.get("insight_generator", 0))
+        + int(agent_counts.get("meta_agent", 0))
+    )
+    return min(50, max(8, implementors * 6 + generators * 3))
+
+
+def prune_queued_hypotheses(
+    db: sqlite3.Connection,
+    *,
+    max_total: int | None = None,
+    max_per_signature: int = 1,
+) -> dict[str, int]:
+    if max_total is None:
+        max_total = hypothesis_backlog_cap(active_agent_counts(db))
+    stamp = now()
+    rows = db.execute(
+        """
+        SELECT *
+        FROM hypotheses
+        WHERE status = 'queued'
+        ORDER BY priority DESC, created_at ASC
+        """
+    ).fetchall()
+    keep: set[str] = set()
+    abandon: set[str] = set()
+    per_sig: dict[str, int] = {}
+    kept_ideas: list[set[str]] = []
+    for row in rows:
+        sig = queued_hypothesis_signature(row)
+        idea = queued_hypothesis_idea(row)
+        redundant_idea = any(same_general_idea(existing, idea) for existing in kept_ideas)
+        if len(keep) < max_total and per_sig.get(sig, 0) < max_per_signature and not redundant_idea:
+            keep.add(row["id"])
+            per_sig[sig] = per_sig.get(sig, 0) + 1
+            kept_ideas.append(idea)
+        else:
+            abandon.add(row["id"])
+    for hyp_id in abandon:
+        db.execute(
+            """
+            UPDATE hypotheses
+            SET status = 'abandoned',
+                rationale = COALESCE(rationale, '') || '\n\n[autoresearch] pruned redundant queued hypothesis',
+                updated_at = ?
+            WHERE id = ? AND status = 'queued'
+            """,
+            (stamp, hyp_id),
+        )
+    return {"kept": len(keep), "abandoned": len(abandon), "cap": max_total}
+
+
+def queue_hypothesis(
+    db: sqlite3.Connection,
+    *,
+    hypothesis_id: str,
+    team_id: str,
+    proposer_agent_id: str | None,
+    parent_hypothesis_id: str | None,
+    priority: int,
+    title: str,
+    rationale: str = "",
+    expected_movement: str = "",
+    context_json: str = "{}",
+    prune: bool = True,
+) -> dict[str, Any]:
+    stamp = now()
+    signature = hypothesis_signature(title, context_json)
+    idea = idea_token_set(title, rationale, expected_movement, context_json)
+    existing = find_matching_hypothesis(db, signature, idea)
+    if existing is not None:
+        result = merge_duplicate_hypothesis(
+            db,
+            existing,
+            proposer_agent_id=proposer_agent_id,
+            priority=priority,
+            rationale=rationale,
+            expected_movement=expected_movement,
+            context_json=context_json,
+            stamp=stamp,
+        )
+        if prune:
+            result["pruned"] = prune_queued_hypotheses(db)
+        result["signature"] = signature
+        return result
+    db.execute(
+        """
+        INSERT INTO hypotheses
+            (id, team_id, proposer_agent_id, parent_hypothesis_id, priority, title, rationale,
+             expected_movement, context_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            hypothesis_id,
+            team_id,
+            proposer_agent_id,
+            parent_hypothesis_id,
+            priority,
+            title,
+            rationale,
+            expected_movement,
+            context_json,
+            stamp,
+            stamp,
+        ),
+    )
+    result = {"hypothesis_id": hypothesis_id, "status": "queued", "signature": signature}
+    if prune:
+        result["pruned"] = prune_queued_hypotheses(db)
+    return result
+
+
 def active_agent_counts(db: sqlite3.Connection) -> dict[str, int]:
     rows = db.execute(
         """
@@ -320,6 +671,8 @@ def clamp(value: int, low: int, high: int) -> int:
 def scale_plan(state: dict[str, Any], allow_idle_retire: bool = False) -> dict[str, Any]:
     hypotheses = state.get("hypotheses", {})
     submissions = state.get("submissions", {})
+    active = state.get("agents", {})
+    backlog_cap = hypothesis_backlog_cap({str(k): int(v) for k, v in active.items()})
     queued_hyp = int(hypotheses.get("queued", 0))
     claimed_hyp = int(hypotheses.get("claimed", 0))
     pending_sub = int(submissions.get("pending_verification", 0))
@@ -333,6 +686,7 @@ def scale_plan(state: dict[str, Any], allow_idle_retire: bool = False) -> dict[s
     manager_need = 1
     if total_backlog >= 24 or pending_sub >= 12:
         manager_need = 2
+    supply_saturated = queued_hyp >= backlog_cap
     if allow_idle_retire and idle:
         desired = {
             "topline_manager": manager_need,
@@ -347,15 +701,14 @@ def scale_plan(state: dict[str, Any], allow_idle_retire: bool = False) -> dict[s
     else:
         desired = {
             "topline_manager": manager_need,
-            "global_searcher": clamp(2 + (1 if queued_hyp < 3 else 0), 2, 4),
-            "creative_explorer": clamp(1 + math.ceil(max(0, 6 - queued_hyp) / 3), 1, 4),
+            "global_searcher": 1 if supply_saturated else clamp(2 + (1 if queued_hyp < 3 else 0), 2, 4),
+            "creative_explorer": 0 if supply_saturated else clamp(1 + math.ceil(max(0, 6 - queued_hyp) / 3), 1, 4),
             "implementor": clamp(math.ceil((queued_hyp + claimed_hyp) / 3), 0, 8),
             "verifier": clamp(math.ceil((pending_sub + in_verification) / 3), 0, 6),
             "researcher": 2,
-            "insight_generator": 1,
-            "meta_agent": 1,
+            "insight_generator": 0 if supply_saturated else 1,
+            "meta_agent": 0 if supply_saturated else 1,
         }
-    active = state.get("agents", {})
     deltas = {role: desired[role] - int(active.get(role, 0)) for role in desired}
     actions = []
     for role, delta in deltas.items():
@@ -378,6 +731,8 @@ def scale_plan(state: dict[str, Any], allow_idle_retire: bool = False) -> dict[s
             "pending_submissions": pending_sub,
             "in_verification": in_verification,
             "total_backlog": total_backlog,
+            "hypothesis_backlog_cap": backlog_cap,
+            "hypothesis_supply_saturated": supply_saturated,
             "idle": idle,
         },
     }
@@ -586,32 +941,22 @@ def cmd_register_agent(args: argparse.Namespace) -> int:
 def cmd_add_hypothesis(args: argparse.Namespace) -> int:
     init_db(args.db)
     db = connect(args.db)
-    stamp = now()
     hyp_id = args.hypothesis_id or next_id(db, "hyp", "hypotheses")
-    db.execute(
-        """
-        INSERT INTO hypotheses
-            (id, team_id, proposer_agent_id, parent_hypothesis_id, priority, title, rationale,
-             expected_movement, context_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            hyp_id,
-            args.team_id,
-            args.proposer_agent_id,
-            args.parent_hypothesis_id,
-            args.priority,
-            args.title,
-            args.rationale or "",
-            args.expected_movement or "",
-            args.context_json,
-            stamp,
-            stamp,
-        ),
+    result = queue_hypothesis(
+        db,
+        hypothesis_id=hyp_id,
+        team_id=args.team_id,
+        proposer_agent_id=args.proposer_agent_id,
+        parent_hypothesis_id=args.parent_hypothesis_id,
+        priority=args.priority,
+        title=args.title,
+        rationale=args.rationale or "",
+        expected_movement=args.expected_movement or "",
+        context_json=args.context_json,
     )
     db.commit()
     db.close()
-    print(json.dumps({"hypothesis_id": hyp_id}, indent=2))
+    print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 

@@ -19,7 +19,7 @@ from uuid import uuid4
 from autoresearch.backend import experiment_config
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = experiment_config.AUTORESEARCH_ROOT
 DEFAULT_BOARD = experiment_config.DEFAULT_BOARD
 
 

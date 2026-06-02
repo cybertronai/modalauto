@@ -12,6 +12,7 @@ import numpy as np
 
 
 SELF_DIM = 8
+LIDAR_DIM = 32
 ENTITY_DIM = 12
 ACTION_DIM = 5  # move x/y, rotate, grab, lock
 TEAM = np.array([1.0, 1.0, -1.0, -1.0], dtype=np.float32)
@@ -79,7 +80,8 @@ def segment_intersects_aabb(p1, p2, center, half_size):
         denom = direction[:, axis]
         parallel = np.abs(denom) < 1e-6
         outside = parallel & ((p1[:, axis] < low) | (p1[:, axis] > high))
-        inv = np.where(parallel, 1.0, 1.0 / denom)
+        inv = np.zeros_like(denom)
+        np.divide(1.0, denom, out=inv, where=~parallel)
         t1 = (low - p1[:, axis]) * inv
         t2 = (high - p1[:, axis]) * inv
         tmin = np.maximum(tmin, np.where(parallel, tmin, np.minimum(t1, t2)))
@@ -93,6 +95,71 @@ def line_blocked(p1, p2, occluders):
     for center, half_size in occluders:
         blocked |= segment_intersects_aabb(p1, p2, center, half_size)
     return blocked
+
+
+def ray_aabb_distance(origin, direction, center, half_size, max_range):
+    tmin = np.zeros((origin.shape[0],), dtype=np.float32)
+    tmax = np.full((origin.shape[0],), max_range, dtype=np.float32)
+    for axis in range(2):
+        low = center[axis] - half_size[axis]
+        high = center[axis] + half_size[axis]
+        denom = direction[:, axis]
+        parallel = np.abs(denom) < 1e-6
+        outside = parallel & ((origin[:, axis] < low) | (origin[:, axis] > high))
+        inv = np.zeros_like(denom)
+        np.divide(1.0, denom, out=inv, where=~parallel)
+        t1 = (low - origin[:, axis]) * inv
+        t2 = (high - origin[:, axis]) * inv
+        tmin = np.maximum(tmin, np.where(parallel, tmin, np.minimum(t1, t2)))
+        tmax = np.minimum(tmax, np.where(parallel, tmax, np.maximum(t1, t2)))
+        tmax[outside] = -1.0
+    hit = (tmax >= np.maximum(tmin, 0.0)) & (tmin <= max_range)
+    return np.where(hit, np.maximum(tmin, 0.0), max_range)
+
+
+def ray_circle_distance(origin, direction, center, radius, max_range):
+    rel = center - origin
+    proj = (rel * direction).sum(axis=1)
+    closest2 = (rel * rel).sum(axis=1) - proj * proj
+    radius2 = radius * radius
+    hit = (proj > 0.0) & (closest2 <= radius2)
+    offset = np.sqrt(np.maximum(radius2 - closest2, 0.0))
+    dist = proj - offset
+    hit &= (dist >= 0.0) & (dist <= max_range)
+    return np.where(hit, dist, max_range)
+
+
+def build_lidar(agent_state, box_state, ramp_state, occluders, max_range=8.0):
+    worlds = agent_state.shape[0]
+    bins = np.linspace(-np.pi, np.pi, LIDAR_DIM, endpoint=False, dtype=np.float32)
+    lidar = np.ones((worlds, 4, LIDAR_DIM), dtype=np.float32)
+    for agent in range(4):
+        origin = agent_state[:, agent, :2]
+        yaw = agent_state[:, agent, 3]
+        for i, offset in enumerate(bins):
+            angle = yaw + offset
+            direction = np.stack([np.cos(angle), np.sin(angle)], axis=1).astype(np.float32)
+            nearest = np.full((worlds,), max_range, dtype=np.float32)
+            for center, half_size in occluders:
+                nearest = np.minimum(nearest, ray_aabb_distance(origin, direction, center, half_size, max_range))
+            for other in range(4):
+                if other != agent:
+                    nearest = np.minimum(
+                        nearest,
+                        ray_circle_distance(origin, direction, agent_state[:, other, :2], 0.32, max_range),
+                    )
+            for box in range(box_state.shape[1]):
+                nearest = np.minimum(
+                    nearest,
+                    ray_circle_distance(origin, direction, box_state[:, box, :2], 0.45, max_range),
+                )
+            for ramp in range(ramp_state.shape[1]):
+                nearest = np.minimum(
+                    nearest,
+                    ray_circle_distance(origin, direction, ramp_state[:, ramp, :2], 0.55, max_range),
+                )
+            lidar[:, agent, i] = nearest / max_range
+    return lidar
 
 
 def agent_visibility(agent_state, occluders, cone_angle=3 / 8 * np.pi):
@@ -139,6 +206,7 @@ def entity_features(self_state, entity_state, entity_type, visible, team_value, 
 def build_obs(agent_state, box_state, ramp_state, phase, occluders):
     worlds = agent_state.shape[0]
     visible_agents = agent_visibility(agent_state, occluders)
+    lidar = build_lidar(agent_state, box_state, ramp_state, occluders)
     self_obs = np.zeros((worlds, 4, SELF_DIM), dtype=np.float32)
     entities = []
     masks = []
@@ -167,7 +235,7 @@ def build_obs(agent_state, box_state, ramp_state, phase, occluders):
             ent_masks.append(np.ones(worlds, dtype=bool))
         entities.append(np.stack(ents, axis=1))
         masks.append(np.stack(ent_masks, axis=1))
-    return self_obs, np.stack(entities, axis=1), np.stack(masks, axis=1).astype(np.float32)
+    return self_obs, lidar, np.stack(entities, axis=1), np.stack(masks, axis=1).astype(np.float32)
 
 
 def manipulate_objects(qpos, qvel, object_slots, agent_state, object_state, actions, locked, phase):
@@ -207,23 +275,34 @@ def make_model(hidden):
         def __init__(self):
             super().__init__()
             self.self_net = nn.Sequential(nn.Linear(SELF_DIM, hidden), nn.Tanh())
+            self.lidar_net = nn.Sequential(
+                nn.Conv1d(1, 8, kernel_size=5, padding=2, padding_mode="circular"),
+                nn.Tanh(),
+                nn.Conv1d(8, 8, kernel_size=3, padding=1, padding_mode="circular"),
+                nn.Tanh(),
+                nn.Flatten(),
+                nn.Linear(8 * LIDAR_DIM, hidden),
+                nn.Tanh(),
+            )
             self.ent_net = nn.Sequential(nn.Linear(ENTITY_DIM, hidden), nn.Tanh())
             self.q = nn.Linear(hidden, hidden, bias=False)
             self.k = nn.Linear(hidden, hidden, bias=False)
             self.v = nn.Linear(hidden, hidden, bias=False)
-            self.main = nn.Sequential(nn.Linear(hidden * 2, hidden), nn.Tanh())
+            self.main = nn.Sequential(nn.Linear(hidden * 3, hidden), nn.Tanh())
             self.actor = nn.Linear(hidden, ACTION_DIM)
             self.critic = nn.Linear(hidden, 1)
             self.log_std = nn.Parameter(torch.full((ACTION_DIM,), -0.6))
 
-        def forward(self, self_obs, entities, masks):
+        def forward(self, self_obs, lidar, entities, masks):
             sh = self.self_net(self_obs)
+            lh = self.lidar_net(lidar.reshape(-1, 1, LIDAR_DIM)).reshape(*self_obs.shape[:-1], hidden)
             eh = self.ent_net(entities)
-            score = (self.q(sh).unsqueeze(2) * self.k(eh)).sum(-1) / np.sqrt(hidden)
+            q = self.q(sh).unsqueeze(-2)
+            score = (q * self.k(eh)).sum(-1) / np.sqrt(hidden)
             score = score.masked_fill(masks <= 0, -1e9)
             attn = torch.softmax(score, dim=-1)
-            ctx = (attn.unsqueeze(-1) * self.v(eh)).sum(dim=2)
-            main = self.main(torch.cat([sh, ctx], dim=-1))
+            ctx = (attn.unsqueeze(-1) * self.v(eh)).sum(dim=-2)
+            main = self.main(torch.cat([sh, lh, ctx], dim=-1))
             mean = self.actor(main)
             value = self.critic(main).squeeze(-1)
             return mean, value
@@ -246,7 +325,10 @@ def collect_rollout(mjw, mjw_model, mjw_data, mjm, model, device, qpos0, qvel0, 
     if mjm.nu:
         set_batched_field(mjw_data.ctrl, ctrl0)
     locked = np.zeros((worlds, slots["objects"].shape[0]), dtype=bool)
-    buf = {k: [] for k in ["self", "entities", "masks", "actions", "logp", "values", "rewards", "dones", "caught"]}
+    buf = {k: [] for k in [
+        "self", "lidar", "entities", "masks", "actions", "logp", "values", "rewards", "dones", "caught",
+        "hider_seen_rate",
+    ]}
     for step_idx in range(horizon):
         phase = "prep" if step_idx < prep_steps else "seek"
         qpos = mjw_data.qpos.numpy()
@@ -255,9 +337,9 @@ def collect_rollout(mjw, mjw_model, mjw_data, mjm, model, device, qpos0, qvel0, 
         box_state = qpos[:, slots["boxes"]].reshape(worlds, slots["boxes"].shape[0], 4).astype(np.float32)
         ramp_state = qpos[:, slots["ramps"]].reshape(worlds, slots["ramps"].shape[0], 4).astype(np.float32)
         object_state = qpos[:, slots["objects"]].reshape(worlds, slots["objects"].shape[0], 4).astype(np.float32)
-        self_obs, entities, masks = build_obs(agent_state, box_state, ramp_state, phase, occluders)
+        self_obs, lidar, entities, masks = build_obs(agent_state, box_state, ramp_state, phase, occluders)
         with torch.no_grad():
-            mean, value = model(to_torch(self_obs, device), to_torch(entities, device), to_torch(masks, device))
+            mean, value = model(to_torch(self_obs, device), to_torch(lidar, device), to_torch(entities, device), to_torch(masks, device))
             dist = torch.distributions.Normal(mean, model.log_std.exp())
             action = dist.sample()
             logp = dist.log_prob(action).sum(-1)
@@ -280,16 +362,122 @@ def collect_rollout(mjw, mjw_model, mjw_data, mjm, model, device, qpos0, qvel0, 
         if phase == "seek":
             reward, hiders_seen = visibility_reward(agent_next, occluders)
             caught = hiders_seen.any(axis=1).astype(np.float32)
+            seen_rate = hiders_seen.mean(axis=1).astype(np.float32)
         else:
             reward = np.zeros((worlds, 4), dtype=np.float32)
             caught = np.zeros((worlds,), dtype=np.float32)
+            seen_rate = np.zeros((worlds,), dtype=np.float32)
         for key, val in [
-            ("self", self_obs), ("entities", entities), ("masks", masks), ("actions", actions_np),
+            ("self", self_obs), ("lidar", lidar), ("entities", entities), ("masks", masks), ("actions", actions_np),
             ("logp", logp.detach().cpu().numpy()), ("values", value.detach().cpu().numpy()),
             ("rewards", reward), ("dones", np.zeros((worlds, 4), dtype=np.float32)), ("caught", caught),
+            ("hider_seen_rate", seen_rate),
         ]:
             buf[key].append(val)
     return {k: np.asarray(v, dtype=np.float32) for k, v in buf.items()}
+
+
+def rollout_frame(step_idx, phase, agent_state, box_state, ramp_state, reward, hiders_seen, visible):
+    agents = []
+    for idx in range(agent_state.shape[0]):
+        agents.append({
+            "name": f"agent{idx}",
+            "team": "hider" if idx < 2 else "seeker",
+            "pos": [
+                round(float(agent_state[idx, 0]), 5),
+                round(float(agent_state[idx, 1]), 5),
+                0.0,
+            ],
+            "yaw": round(float(agent_state[idx, 3]), 5),
+            "seen": bool(hiders_seen[idx]) if idx < 2 else False,
+            "seeing_hider": bool(visible[idx, :2].any()) if idx >= 2 else False,
+        })
+    boxes = [
+        {
+            "name": f"moveable_box{i}",
+            "pos": [round(float(st[0]), 5), round(float(st[1]), 5), 0.0],
+            "yaw": round(float(st[3]), 5),
+        }
+        for i, st in enumerate(box_state)
+    ]
+    ramps = [
+        {
+            "name": f"ramp{i}",
+            "pos": [round(float(st[0]), 5), round(float(st[1]), 5), 0.0],
+            "yaw": round(float(st[3]), 5),
+        }
+        for i, st in enumerate(ramp_state)
+    ]
+    return {
+        "step": int(step_idx),
+        "prep": phase == "prep",
+        "reward": np.asarray(reward, dtype=float).round(5).tolist(),
+        "visibility": {
+            "agent_agent": visible.astype(int).tolist(),
+            "seeker_hider": visible[2:, :2].astype(int).tolist(),
+            "hiders_seen": hiders_seen.astype(int).tolist(),
+            "any_hider_seen": bool(hiders_seen.any()),
+        },
+        "agents": agents,
+        "boxes": boxes,
+        "ramps": ramps,
+    }
+
+
+def export_policy_rollout(mjw, mjw_model, mjw_data, mjm, model, device, qpos0, qvel0, ctrl0, slots, steps, prep_steps, occluders, source, out_path):
+    worlds = tuple(mjw_data.qpos.shape)[0]
+    if worlds < 1:
+        raise ValueError("rollout export requires at least one world")
+    set_batched_field(mjw_data.qpos, qpos0)
+    set_batched_field(mjw_data.qvel, qvel0)
+    if mjm.nu:
+        set_batched_field(mjw_data.ctrl, ctrl0)
+    locked = np.zeros((worlds, slots["objects"].shape[0]), dtype=bool)
+    frames = []
+    total_reward = np.zeros((4,), dtype=np.float32)
+    for step_idx in range(steps + 1):
+        phase = "prep" if step_idx < prep_steps else "seek"
+        qpos = mjw_data.qpos.numpy()
+        qvel = mjw_data.qvel.numpy()
+        agent_state = qpos[:, slots["agents"]].reshape(worlds, 4, 4).astype(np.float32)
+        box_state = qpos[:, slots["boxes"]].reshape(worlds, slots["boxes"].shape[0], 4).astype(np.float32)
+        ramp_state = qpos[:, slots["ramps"]].reshape(worlds, slots["ramps"].shape[0], 4).astype(np.float32)
+        visible = agent_visibility(agent_state[:1], occluders)[0]
+        reward, hiders_seen_batch = visibility_reward(agent_state[:1], occluders) if phase == "seek" else (
+            np.zeros((1, 4), dtype=np.float32),
+            np.zeros((1, 2), dtype=bool),
+        )
+        if phase == "seek":
+            total_reward += reward[0]
+        frames.append(rollout_frame(step_idx, phase, agent_state[0], box_state[0], ramp_state[0], reward[0], hiders_seen_batch[0], visible))
+        if step_idx == steps:
+            break
+        object_state = qpos[:, slots["objects"]].reshape(worlds, slots["objects"].shape[0], 4).astype(np.float32)
+        self_obs, lidar, entities, masks = build_obs(agent_state, box_state, ramp_state, phase, occluders)
+        with __import__("torch").no_grad():
+            mean, _ = model(to_torch(self_obs, device), to_torch(lidar, device), to_torch(entities, device), to_torch(masks, device))
+        actions_np = mean.detach().cpu().numpy()
+        if phase == "prep":
+            actions_np[:, 2:, :] = 0.0
+        qpos, qvel, locked = manipulate_objects(qpos, qvel, slots["objects"], agent_state, object_state, actions_np, locked, phase)
+        assign_field(mjw_data.qpos, qpos)
+        assign_field(mjw_data.qvel, qvel)
+        ctrl = np.zeros((worlds, mjm.nu), dtype=np.float32)
+        ctrl_view = ctrl[:, :12].reshape(worlds, 4, 3)
+        ctrl_view[:, :, :2] = np.tanh(actions_np[:, :, :2]) * 0.6
+        ctrl_view[:, :, 2] = np.tanh(actions_np[:, :, 2]) * 0.5
+        if phase == "prep":
+            ctrl_view[:, 2:, :] = 0.0
+        assign_field(mjw_data.ctrl, ctrl)
+        mjw.step(mjw_model, mjw_data)
+    payload = {
+        "source": {**source, "policy": "mjwarp_ppo_checkpoint", "steps_requested": steps},
+        "total_reward": total_reward.round(5).tolist(),
+        "frames": frames,
+    }
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(out_path).write_text(json.dumps(payload, indent=2))
+    return payload
 
 
 def compute_gae(rewards, values, gamma=0.99, lam=0.95):
@@ -312,6 +500,7 @@ def ppo_update(model, optimizer, batch, device, epochs, minibatch, clip_coef, vf
     adv = (adv - adv.mean()) / (adv.std() + 1e-6)
     flat = {
         "self": batch["self"].reshape(T * W * A, SELF_DIM),
+        "lidar": batch["lidar"].reshape(T * W * A, LIDAR_DIM),
         "entities": batch["entities"].reshape(T * W * A, batch["entities"].shape[3], ENTITY_DIM),
         "masks": batch["masks"].reshape(T * W * A, batch["masks"].shape[3]),
         "actions": batch["actions"].reshape(T * W * A, ACTION_DIM),
@@ -326,7 +515,7 @@ def ppo_update(model, optimizer, batch, device, epochs, minibatch, clip_coef, vf
         np.random.shuffle(idx)
         for start in range(0, n, minibatch):
             mb = idx[start:start + minibatch]
-            mean, value = model(to_torch(flat["self"][mb], device), to_torch(flat["entities"][mb], device), to_torch(flat["masks"][mb], device))
+            mean, value = model(to_torch(flat["self"][mb], device), to_torch(flat["lidar"][mb], device), to_torch(flat["entities"][mb], device), to_torch(flat["masks"][mb], device))
             dist = torch.distributions.Normal(mean, model.log_std.exp())
             new_logp = dist.log_prob(to_torch(flat["actions"][mb], device)).sum(-1)
             ratio = torch.exp(new_logp - to_torch(flat["logp"][mb], device))
@@ -353,8 +542,12 @@ def main():
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--minibatch", type=int, default=512)
+    parser.add_argument("--hidden", type=int, default=64)
+    parser.add_argument("--entropy-coef", type=float, default=0.01)
     parser.add_argument("--out", default="mjwarp_train_smoke.json")
     parser.add_argument("--checkpoint", default="mjwarp_policy.pt")
+    parser.add_argument("--rollout-out", default=None)
+    parser.add_argument("--rollout-steps", type=int, default=96)
     args = parser.parse_args()
 
     import torch
@@ -370,7 +563,7 @@ def main():
     print("train: imported mujoco/mjwarp/warp", flush=True)
 
     torch.manual_seed(0)
-    model = make_model(64).to(device)
+    model = make_model(args.hidden).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     print("train: model initialized", flush=True)
     wp.init()
@@ -395,29 +588,57 @@ def main():
     history = []
     for update in range(args.updates):
         batch = collect_rollout(mjw, mjw_model, mjw_data, mjm, model, device, qpos0, qvel0, ctrl0, slots, args.horizon, prep_steps, occluders)
-        stats = ppo_update(model, optimizer, batch, device, args.epochs, args.minibatch, 0.2, 0.5, 0.01)
+        stats = ppo_update(model, optimizer, batch, device, args.epochs, args.minibatch, 0.2, 0.5, args.entropy_coef)
         seek_rewards = batch["rewards"][prep_steps:]
+        hider_rewards = seek_rewards[:, :, :2]
+        seeker_rewards = seek_rewards[:, :, 2:]
         item = {
             "update": update,
             "mean_visibility_selfplay_reward": round(float(seek_rewards.mean()), 6),
+            "mean_hider_reward": round(float(hider_rewards.mean()), 6),
+            "mean_seeker_reward": round(float(seeker_rewards.mean()), 6),
             "caught_fraction": round(float(batch["caught"][prep_steps:].mean()), 6),
+            "hider_seen_rate": round(float(batch["hider_seen_rate"][prep_steps:].mean()), 6),
             **{k: round(v, 6) for k, v in stats.items()},
         }
         history.append(item)
         print(item, flush=True)
     Path(args.checkpoint).parent.mkdir(parents=True, exist_ok=True)
     torch.save({"model": model.state_dict(), "source": payload["source"], "arch": "entity_attention_ppo"}, args.checkpoint)
+    rollout_path = args.rollout_out
+    if rollout_path:
+        export_policy_rollout(
+            mjw, mjw_model, mjw_data, mjm, model, device, qpos0, qvel0, ctrl0, slots,
+            args.rollout_steps, int(round(args.rollout_steps * args.prep_fraction)), occluders,
+            payload["source"], rollout_path,
+        )
     result = {
         "source": payload["source"],
         "worlds": args.worlds,
         "updates": args.updates,
         "horizon": args.horizon,
         "objective": "paper_visibility_selfplay_entity_attention_ppo",
+        "paper_components": [
+            "shared blue/red self-play policy",
+            "preparation phase with seekers frozen",
+            "frontal vision cone and wall line-of-sight mask",
+            "circular 1D lidar convolution stream",
+            "entity embeddings for agents boxes and ramps",
+            "masked entity attention",
+            "movement grabbing and locking action heads",
+        ],
         "checkpoint": args.checkpoint,
+        "rollout": rollout_path,
         "history": history,
         "prep_fraction": args.prep_fraction,
+        "lr": args.lr,
+        "hidden": args.hidden,
+        "entropy_coef": args.entropy_coef,
         "final_mean_visibility_selfplay_reward": history[-1]["mean_visibility_selfplay_reward"] if history else 0.0,
+        "final_mean_hider_reward": history[-1]["mean_hider_reward"] if history else 0.0,
+        "final_mean_seeker_reward": history[-1]["mean_seeker_reward"] if history else 0.0,
         "final_caught_fraction": history[-1]["caught_fraction"] if history else 0.0,
+        "final_hider_seen_rate": history[-1]["hider_seen_rate"] if history else 0.0,
     }
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(result, indent=2))

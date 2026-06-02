@@ -335,6 +335,180 @@ def completion_decision(args: argparse.Namespace, db, state: dict[str, object]) 
     }
 
 
+def recent_manager_decisions(db, limit: int = 3) -> list[dict[str, object]]:
+    rows = db.execute(
+        """
+        SELECT payload_json
+        FROM manager_events
+        WHERE kind = 'manager_step'
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    decisions = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"])
+        except Exception:
+            continue
+        decision = payload.get("manager_decision") if isinstance(payload, dict) else None
+        if isinstance(decision, dict):
+            decisions.append(decision)
+    return decisions
+
+
+def recent_idle_no_action_steps(db, limit: int = 3) -> int:
+    rows = db.execute(
+        """
+        SELECT payload_json
+        FROM manager_events
+        WHERE kind = 'manager_step'
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    streak = 0
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"])
+        except Exception:
+            break
+        plan = payload.get("plan") if isinstance(payload, dict) else {}
+        signals = plan.get("signals") if isinstance(plan, dict) and isinstance(plan.get("signals"), dict) else {}
+        intended = payload.get("intended_actions") if isinstance(payload, dict) else []
+        completion = payload.get("completion") if isinstance(payload, dict) else None
+        if completion:
+            streak += 1
+        elif signals.get("idle") and not intended:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def manager_seed_hypothesis(db, args: argparse.Namespace, state: dict[str, object]) -> dict[str, object]:
+    best = state.get("best_frontier") if isinstance(state.get("best_frontier"), dict) else {}
+    parent_hypothesis_id = usable_frontier_parent(db, best)
+    result = queue_agent_hypothesis(
+        db,
+        args,
+        parent_hypothesis_id=parent_hypothesis_id,
+        priority=9,
+        title="Manager seed: broaden search after idle team",
+        rationale=(
+            "The manager observed no queued, claimed, or pending work while the team was still alive. "
+            "Seed one broad non-duplicate direction instead of looping idly."
+        ),
+        expected_movement="Restart useful search only if this idea is distinct from existing journal hypotheses.",
+        context={
+            "source": "topline_manager",
+            "implementation": {
+                "operator": "enumerate_schedule_family",
+                "reuse_goals": ["hold_A_sweep_B", "hold_B_sweep_A", "reduce_output_storage"],
+                "low_address_roles": ["input_cache", "multiply_tmp", "scratch_strip", "accumulators"],
+                "manager_reason": "idle_team_no_work",
+            },
+            "best_frontier": best,
+            "parent_source": "best_frontier" if parent_hypothesis_id else None,
+        },
+    )
+    return result
+
+
+def manager_decision(
+    db,
+    args: argparse.Namespace,
+    state: dict[str, object],
+    plan: dict[str, object],
+    intended_actions: list[dict[str, object]],
+    *,
+    apply_actions: bool = True,
+) -> dict[str, object]:
+    signals = plan.get("signals") if isinstance(plan.get("signals"), dict) else {}
+    active = plan.get("active") if isinstance(plan.get("active"), dict) else {}
+    total_hypotheses = int(
+        db.execute("SELECT COUNT(*) AS n FROM hypotheses").fetchone()["n"]
+    )
+    active_generators = sum(
+        int(active.get(role, 0))
+        for role in ["creative_explorer", "global_searcher", "insight_generator", "meta_agent"]
+    )
+    non_manager_agents = sum(int(count) for role, count in active.items() if role != "topline_manager")
+    base = {
+        "signals": signals,
+        "active_generators": active_generators,
+        "non_manager_agents": non_manager_agents,
+        "total_hypotheses": total_hypotheses,
+    }
+    if intended_actions:
+        return {
+            "decision": "continue_scale",
+            "rationale": "manager has useful scale actions to apply",
+            **base,
+        }
+    if not signals.get("idle"):
+        return {
+            "decision": "continue_wait",
+            "rationale": "work is still queued, claimed, pending, or in verification",
+            **base,
+        }
+    if non_manager_agents <= 0:
+        return {
+            "decision": "continue_wait",
+            "rationale": "manager is alone; scale policy should create the initial team before judging completion",
+            **base,
+        }
+    recent_decisions = recent_manager_decisions(db)
+    previous_seed = any(item.get("decision") == "continue_seed_hypothesis" for item in recent_decisions[:2])
+    idle_streak = recent_idle_no_action_steps(db) + 1
+    if active_generators > 0 and not previous_seed:
+        seed = (
+            manager_seed_hypothesis(db, args, state)
+            if apply_actions
+            else {"status": "skipped", "reason": "apply_scale_disabled"}
+        )
+        return {
+            "decision": "continue_seed_hypothesis",
+            "rationale": "team is alive but idle, so the manager seeded one broad direction before considering stop",
+            "seed": seed,
+            "idle_streak": idle_streak,
+            **base,
+        }
+    idle_streak = recent_idle_no_action_steps(db) + 1
+    if idle_streak < 2:
+        return {
+            "decision": "continue_wait",
+            "rationale": "first idle observation; wait one manager cycle for agents or SSE-visible journal state to settle",
+            "idle_streak": idle_streak,
+            **base,
+        }
+    gate = "manager_exhausted_after_seed" if previous_seed else "manager_idle_no_work"
+    rationale = (
+        "manager seeded a broad direction and the journal still has no queued, claimed, or pending work"
+        if previous_seed
+        else "manager repeatedly observed no queued, claimed, or pending work and no useful scale actions"
+    )
+    return {
+        "decision": "stop_complete",
+        "rationale": rationale,
+        "completion": {
+            "reason": "research_complete",
+            "gate": gate,
+            "message": rationale,
+        },
+        "queued_hypotheses": signals.get("queued_hypotheses", 0),
+        "claimed_hypotheses": signals.get("claimed_hypotheses", 0),
+        "pending_submissions": signals.get("pending_submissions", 0),
+        "in_verification": signals.get("in_verification", 0),
+        "non_manager_agents": non_manager_agents,
+        "idle_streak": idle_streak,
+        "idle_streak": idle_streak,
+        **base,
+    }
+
+
 def connect_team(args: argparse.Namespace):
     if not args.db.exists():
         team_journal.init_db(args.db)
@@ -574,6 +748,33 @@ def parse_runner_result(raw: str) -> dict:
     raise ValueError("runner stdout did not contain a JSON object")
 
 
+def queue_agent_hypothesis(
+    db,
+    args: argparse.Namespace,
+    *,
+    parent_hypothesis_id: str | None,
+    priority: int,
+    title: str,
+    rationale: str,
+    expected_movement: str,
+    context: dict[str, object],
+) -> dict[str, object]:
+    result = team_journal.queue_hypothesis(
+        db,
+        hypothesis_id=fresh_id("hyp"),
+        team_id=args.team_id,
+        proposer_agent_id=args.agent_id,
+        parent_hypothesis_id=parent_hypothesis_id,
+        priority=priority,
+        title=title,
+        rationale=rationale,
+        expected_movement=expected_movement,
+        context_json=json.dumps(context, sort_keys=True),
+    )
+    result["title"] = title
+    return result
+
+
 def successful_donors(db, limit: int = 12, maximize: bool = False) -> list[dict]:
     direction = "DESC" if maximize else "ASC"
     rows = db.execute(
@@ -753,39 +954,27 @@ def propose_hypothesis(args: argparse.Namespace, radical: bool = False) -> dict[
     title, rationale, movement, plan = templates[existing % len(templates)]
     strategy = plan if isinstance(plan, str) else "reasoned"
     operator_payload = {"strategy": strategy} if isinstance(plan, str) else plan
-    hyp_id = fresh_id("hyp")
-    stamp = team_journal.now()
-    db.execute(
-        """
-        INSERT INTO hypotheses
-            (id, team_id, proposer_agent_id, parent_hypothesis_id, priority, title, rationale,
-             expected_movement, context_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            hyp_id,
-            args.team_id,
-            args.agent_id,
-            parent_hypothesis_id,
-            10 if radical else 5,
-            title,
-            rationale,
-            movement,
-            json.dumps({
-                "radical": radical,
-                "source": args.role,
-                "implementation": operator_payload,
-                "parent_source": "best_frontier" if parent_hypothesis_id else None,
-                "best_frontier": best,
-            }),
-            stamp,
-            stamp,
-        ),
+    result = queue_agent_hypothesis(
+        db,
+        args,
+        parent_hypothesis_id=parent_hypothesis_id,
+        priority=10 if radical else 5,
+        title=title,
+        rationale=rationale,
+        expected_movement=movement,
+        context={
+            "radical": radical,
+            "source": args.role,
+            "implementation": operator_payload,
+            "parent_source": "best_frontier" if parent_hypothesis_id else None,
+            "best_frontier": best,
+        },
     )
     db.commit()
     db.close()
+    hyp_id = str(result["hypothesis_id"])
     post(args.board, args.agent_id, "global", "hypothesis", title, {"hypothesis_id": hyp_id})
-    return {"hypothesis_id": hyp_id, "title": title, "strategy": strategy}
+    return {**result, "hypothesis_id": hyp_id, "title": title, "strategy": strategy}
 
 
 def run_creative_step(args: argparse.Namespace) -> None:
@@ -829,8 +1018,6 @@ def run_insight_generator_step(args: argparse.Namespace) -> None:
         families[family] = families.get(family, 0) + 1
         if score:
             scores.append(score)
-    hyp_id = fresh_id("hyp")
-    stamp = team_journal.now()
     insight = {
         "operator": "enumerate_panels",
         "insight": "If many recent submissions share the same family/score, force broader loop-order and address-layout reasoning before more implementation.",
@@ -838,33 +1025,24 @@ def run_insight_generator_step(args: argparse.Namespace) -> None:
         "recent_families": families,
         "recent_best": (max(scores) if maximize else min(scores)) if scores else None,
     }
-    db.execute(
-        """
-        INSERT INTO hypotheses
-            (id, team_id, proposer_agent_id, parent_hypothesis_id, priority, title, rationale,
-             expected_movement, context_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            hyp_id,
-            args.team_id,
-            args.agent_id,
-            parent_hypothesis_id,
-            7,
-            "Insight: plateau requires new loop/address heuristic",
-            "Analyze recent submissions and add a simplification heuristic without committing to one named solution.",
-            "Push global search away from duplicate families and toward reusable value/address-cost heuristics.",
-            json.dumps({"source": args.role, "implementation": insight, "parent_source": "best_frontier"}),
-            stamp,
-            stamp,
-        ),
+    result = queue_agent_hypothesis(
+        db,
+        args,
+        parent_hypothesis_id=parent_hypothesis_id,
+        priority=7,
+        title="Insight: plateau requires new loop/address heuristic",
+        rationale="Analyze recent submissions and add a simplification heuristic without committing to one named solution.",
+        expected_movement="Push global search away from duplicate families and toward reusable value/address-cost heuristics.",
+        context={"source": args.role, "implementation": insight, "parent_source": "best_frontier"},
     )
     db.commit()
     db.close()
+    hyp_id = str(result["hypothesis_id"])
     post(args.board, args.agent_id, "global", "insight", "plateau heuristic generated", {
         "hypothesis_id": hyp_id,
         "recent_families": families,
         "best_frontier": best,
+        "status": result.get("status"),
     })
     heartbeat(args, "idle")
 
@@ -1265,30 +1443,19 @@ def run_meta_agent_step(args: argparse.Namespace) -> None:
             operator["promoted_tool"] = {"tool_id": tool_id, "tool_path": str(tool_path), "signature": signature}
         else:
             operator["duplicate_tool_id"] = duplicate["id"]
-    hyp_id = fresh_id("hyp")
     stamp = team_journal.now()
     title = "Meta-capability: escape plateau" if plateau else "Meta-capability: monitor loop bottleneck"
-    db.execute(
-        """
-        INSERT INTO hypotheses
-            (id, team_id, proposer_agent_id, parent_hypothesis_id, priority, title, rationale,
-             expected_movement, context_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            hyp_id,
-            args.team_id,
-            args.agent_id,
-            parent_hypothesis_id,
-            12,
-            title,
-            "Analyze top-line loop dynamics and propose the next generic capability without task-specific solution names.",
-            "Increase search diversity or unblock the current throughput bottleneck.",
-            json.dumps({"source": args.role, "implementation": operator}),
-            stamp,
-            stamp,
-        ),
+    hyp_result = queue_agent_hypothesis(
+        db,
+        args,
+        parent_hypothesis_id=parent_hypothesis_id,
+        priority=12,
+        title=title,
+        rationale="Analyze top-line loop dynamics and propose the next generic capability without task-specific solution names.",
+        expected_movement="Increase search diversity or unblock the current throughput bottleneck.",
+        context={"source": args.role, "implementation": operator},
     )
+    hyp_id = str(hyp_result["hypothesis_id"])
     if tool_id and tool_path:
         retire_duplicate_tools(db, signature, keep_tool_id=tool_id)
         db.execute(
@@ -1315,65 +1482,43 @@ def run_meta_agent_step(args: argparse.Namespace) -> None:
                 stamp,
             ),
         )
-        tool_hyp_id = fresh_id("hyp")
         tool_impl = {
             "operator": "promoted_tool",
             "tool_id": tool_id,
             "tool_path": str(tool_path),
             "base_capability": operator,
         }
-        db.execute(
-            """
-            INSERT INTO hypotheses
-                (id, team_id, proposer_agent_id, parent_hypothesis_id, priority, title, rationale,
-                 expected_movement, context_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                tool_hyp_id,
-                args.team_id,
-                args.agent_id,
-                hyp_id,
-                14,
-                "Use promoted meta tool to escape plateau",
-                "A meta-agent generated a local tool from top-line plateau analysis; test it as a candidate generator.",
-                "Increase result diversity and attempt a frontier improvement.",
-                json.dumps({"source": args.role, "implementation": tool_impl}),
-                stamp,
-                stamp,
-            ),
+        tool_hyp_result = queue_agent_hypothesis(
+            db,
+            args,
+            parent_hypothesis_id=hyp_id,
+            priority=14,
+            title="Use promoted meta tool to escape plateau",
+            rationale="A meta-agent generated a local tool from top-line plateau analysis; test it as a candidate generator.",
+            expected_movement="Increase result diversity and attempt a frontier improvement.",
+            context={"source": args.role, "implementation": tool_impl},
         )
+        tool_hyp_id = str(tool_hyp_result["hypothesis_id"])
     transfer_hyp_id = None
     transfer = transfer_payload(parent_hypothesis_id, successful_donors(db, maximize=maximize), dominant_family) if plateau else None
     if transfer:
-        transfer_hyp_id = fresh_id("hyp")
         donor_id = transfer["evolution"]["donor_hypothesis_id"]
         recipient_id = transfer["evolution"]["recipient_hypothesis_id"]
-        db.execute(
-            """
-            INSERT INTO hypotheses
-                (id, team_id, proposer_agent_id, parent_hypothesis_id, priority, title, rationale,
-                 expected_movement, context_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                transfer_hyp_id,
-                args.team_id,
-                args.agent_id,
-                recipient_id,
-                13,
-                "Horizontal transfer: recombine successful branch",
-                "A distinct accepted branch has useful implementation structure; transfer that gene into the current frontier branch.",
-                "Increase diversity without injecting seeded task-specific strategy names.",
-                json.dumps({
-                    "source": args.role,
-                    "implementation": transfer["implementation"],
-                    "evolution": transfer["evolution"],
-                }),
-                stamp,
-                stamp,
-            ),
+        transfer_result = queue_agent_hypothesis(
+            db,
+            args,
+            parent_hypothesis_id=recipient_id,
+            priority=13,
+            title="Horizontal transfer: recombine successful branch",
+            rationale="A distinct accepted branch has useful implementation structure; transfer that gene into the current frontier branch.",
+            expected_movement="Increase diversity without injecting seeded task-specific strategy names.",
+            context={
+                "source": args.role,
+                "implementation": transfer["implementation"],
+                "evolution": transfer["evolution"],
+            },
         )
+        transfer_hyp_id = str(transfer_result["hypothesis_id"])
         post(args.board, args.agent_id, "evolution", "gene_transfer", "horizontal transfer hypothesis queued", {
             "hypothesis_id": transfer_hyp_id,
             "donor_hypothesis_id": donor_id,
@@ -1394,12 +1539,15 @@ def run_meta_agent_step(args: argparse.Namespace) -> None:
         "signature": signature,
         "duplicate_tool_id": operator.get("duplicate_tool_id"),
         "transfer_hypothesis_id": transfer_hyp_id,
+        "hypothesis_status": hyp_result.get("status"),
     })
     heartbeat(args, "idle")
 
 
 def claim_hypothesis(args: argparse.Namespace):
     db = connect_team(args)
+    team_journal.prune_queued_hypotheses(db)
+    db.commit()
     row = db.execute(
         """
         SELECT * FROM hypotheses
@@ -1809,7 +1957,8 @@ def spawn_agent(args: argparse.Namespace, role: str) -> str:
     stderr = (log_dir / f"{agent_id}.err.log").open("a")
     cmd = [
         sys.executable,
-        str(REPO_ROOT / "bin" / "autoresearch-agent"),
+        "-m",
+        "autoresearch.backend.agent_runtime",
         role,
         "--experiment-root",
         str(args.experiment_root),
@@ -1872,6 +2021,18 @@ def run_manager_step(args: argparse.Namespace) -> None:
     completion = completion_decision(args, db, state)
     peer_counts = recent_peer_intent_counts(args, window_seconds=args.intent_window_seconds)
     intended_actions = [] if completion else subtract_peer_intents(plan["actions"], peer_counts)
+    decision = None
+    if completion is None:
+        decision = manager_decision(db, args, state, plan, intended_actions, apply_actions=args.apply_scale)
+        if decision.get("decision") == "stop_complete":
+            completion = decision.get("completion")
+            intended_actions = []
+    else:
+        decision = {
+            "decision": "stop_complete",
+            "rationale": f"configured completion gate fired: {completion.get('gate')}",
+            "completion": completion,
+        }
     signals = plan.get("signals", {}) if isinstance(plan.get("signals"), dict) else {}
     step_label = getattr(args, "step_index", "?")
     console_feedback(
@@ -1893,6 +2054,7 @@ def run_manager_step(args: argparse.Namespace) -> None:
                 "stale": stale,
                 "plan": plan,
                 "completion": completion,
+                "manager_decision": decision,
                 "peer_intents": {f"{k[0]}:{k[1]}": v for k, v in peer_counts.items()},
                 "intended_actions": intended_actions,
                 "state": state,
@@ -1906,11 +2068,13 @@ def run_manager_step(args: argparse.Namespace) -> None:
     if completion:
         post(args.board, args.agent_id, "global", "stop", "research complete", completion)
         post(args.board, args.agent_id, "manager-actions", "research_complete", "completion gate fired", completion)
+        args.manager_completed = True
 
     post(args.board, args.agent_id, "manager-actions", "scale_intent", "manager intent", {
         "actions": intended_actions,
         "peer_intents": {f"{k[0]}:{k[1]}": v for k, v in peer_counts.items()},
         "signals": plan.get("signals", {}),
+        "manager_decision": decision,
         "completion": completion,
     })
 
@@ -1944,6 +2108,7 @@ def run_manager_step(args: argparse.Namespace) -> None:
         "plan": plan,
         "intended_actions": intended_actions,
         "applied": applied,
+        "manager_decision": decision,
         "best_frontier": state.get("best_frontier"),
     }
     post(args.board, args.agent_id, "manager-actions", "scale_applied", "manager applied", {"applied": applied})
@@ -2041,6 +2206,9 @@ def main(argv: list[str] | None = None) -> int:
             relay_feedback_messages(args)
             steps += 1
             if args.once or (args.max_steps is not None and steps >= args.max_steps):
+                finish(args, "dead")
+                return 0
+            if args.role == "topline_manager" and getattr(args, "manager_completed", False):
                 finish(args, "dead")
                 return 0
             time.sleep(args.interval)

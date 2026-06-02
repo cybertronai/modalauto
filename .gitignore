@@ -1,35 +1,29 @@
-# Python/runtime artifacts
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
-_vizdoom.ini
-
-# Local virtual environments and tooling caches
-.venv/
-venv/
 .mypy_cache/
 .ruff_cache/
+.venv/
+venv/
 
-# Generated experiment output
-experiments/*/journal/artifacts/
-experiments/*/journal/messages/
-experiments/*/journal/messages.before-*/
-experiments/*/journal/runs/
-experiments/*/journal/*.db
-experiments/*/journal/*.db-shm
-experiments/*/journal/*.db-wal
-experiments/*/journal/*.jsonl
+# Local simulator/config artifacts
+_vizdoom.ini
+
+# Generated autoresearch state
+experiments/*/journal/
 experiments/*/worktrees/
-experiments/openai_hide_and_seek/examples/*.npz
-experiments/openai_hide_and_seek/examples/**/*.npz
 
-# Frontend dependencies/build outputs
+# Frontend dependencies and builds
 node_modules/
-frontend/node_modules/
-frontend/dist/
-frontend/build/
-frontend/scripts/__pycache__/
-frontend/*.db
-frontend/*.db-shm
-frontend/*.db-wal
+dist/
+build/
+
+# Large generated experiment assets
+experiments/**/*.pt
+experiments/**/*.npz
+experiments/**/visualization/public/generated_3d/
+experiments/**/visualization/public/rollouts/
+experiments/**/visualization/public/showcase/
+experiments/**/visualization/progress.md

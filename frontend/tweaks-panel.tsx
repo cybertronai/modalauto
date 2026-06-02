@@ -1,6 +1,6 @@
 
 /* BEGIN USAGE */
-// tweaks-panel.jsx
+// tweaks-panel.tsx
 // Reusable Tweaks shell + form-control helpers.
 // Exports (to window): useTweaks, TweaksPanel, TweakSection, TweakRow, TweakSlider,
 //   TweakToggle, TweakRadio, TweakSelect, TweakText, TweakNumber, TweakColor, TweakButton.
@@ -294,7 +294,7 @@ function TweakSection({ label, children }) {
   );
 }
 
-function TweakRow({ label, value, children, inline = false }) {
+function TweakRow({ label, value = null, children, inline = false }) {
   return (
     <div className={inline ? 'twk-row twk-row-h' : 'twk-row'}>
       <div className="twk-lbl">

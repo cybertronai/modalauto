@@ -154,7 +154,11 @@ def is_experiment_process(process: ProcessInfo, exp: experiment_config.Experimen
     if process.pid == os.getpid():
         return False
     command = process.command
-    if "autoresearch-agent" not in command and "/loop.py" not in command:
+    if (
+        "autoresearch-agent" not in command
+        and "autoresearch.backend.agent_runtime" not in command
+        and "/loop.py" not in command
+    ):
         return False
     exp_root = str(exp.root.expanduser().resolve())
     needles = [
@@ -194,6 +198,9 @@ def wait_for_exit(processes: list[ProcessInfo], timeout: float) -> list[ProcessI
 
 def process_role(command: str) -> str:
     match = re.search(r"autoresearch-agent\s+([A-Za-z0-9_-]+)", command)
+    if match:
+        return match.group(1)
+    match = re.search(r"autoresearch\.backend\.agent_runtime\s+([A-Za-z0-9_-]+)", command)
     if match:
         return match.group(1)
     if "/loop.py" in command:

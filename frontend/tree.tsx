@@ -2,26 +2,15 @@
    Color & size encode fitness. Pan (drag) + zoom (wheel). Click a node to inspect. */
 (function () {
   const { useState, useRef, useEffect, useMemo, useCallback } = React;
+  const UI = window.AutoresearchUI;
   let E = window.APP;
-  window.addEventListener('autoresearch-world', (event) => { E = event.detail || window.APP; });
+  window.addEventListener('autoresearch-world', (event: CustomEvent) => { E = event.detail || window.APP; });
 
   const VW = 2200, VH = 860, PAD = 70;
-  const fmtScore = (n) => {
-    if (n == null) return '—';
-    if (!Number.isFinite(n)) return String(n);
-    const abs = Math.abs(n);
-    const maximumFractionDigits = Number.isInteger(n) ? 0 : abs >= 100 ? 2 : abs >= 1 ? 3 : 4;
-    return n.toLocaleString(undefined, { maximumFractionDigits });
-  };
+  const fmtScore = UI.fmt;
   const ROLE_LANES = ['topline_manager', 'meta_agent', 'insight_generator', 'creative_explorer', 'global_searcher', 'implementor', 'verifier', 'researcher'];
   const finiteTime = (t, fallback = 0) => (typeof t === 'number' && Number.isFinite(t) ? t : fallback);
-  const mmss = (t) => {
-    const safe = Math.max(0, finiteTime(t));
-    const total = Math.round(safe);
-    const minutes = Math.floor(total / 60);
-    const seconds = total % 60;
-    return String(minutes).padStart(2, '0') + ':' + String(seconds).padStart(2, '0');
-  };
+  const mmss = UI.mmss;
   function hash01(s) {
     let h = 2166136261;
     for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
@@ -31,9 +20,13 @@
   function buildTreeLayout(world) {
     const E = world || { meta: {}, nodes: [] };
     const IS_MAX = String(E.meta.direction || 'minimize').toLowerCase() === 'maximize';
-    const scoreValues = E.nodes
+    const compactRunLayout = E.meta.domain === 'hide_and_seek_mjwarp' && E.nodes.length <= 24;
+    const scoreSourceNodes = compactRunLayout
+      ? E.nodes.filter((n) => n.score != null && !String(n.family || '').includes('mjwarp_train_smoke') && String(n.id || '').startsWith('hs-'))
+      : E.nodes;
+    const scoreValues = scoreSourceNodes
       .map((n) => n.score)
-      .concat([E.meta.baseline, E.meta.best, E.meta.target])
+      .concat(compactRunLayout ? [E.meta.best] : [E.meta.baseline, E.meta.best, E.meta.target])
       .filter((v) => typeof v === 'number' && Number.isFinite(v));
     if (!scoreValues.length) scoreValues.push(0, 1);
     const SLOW = Math.min(...scoreValues);
@@ -49,7 +42,7 @@
     };
     const scoreNudge = (amount) => (IS_MAX ? -amount : amount);
     const hasRealLineage = E.nodes.some((n) => n.parent);
-    const parentFanout = {};
+    const parentFanout: Record<string, number> = {};
     const parentOf = (n) => n.displayParent || n.parent;
     E.nodes.forEach((n) => { const p = parentOf(n); if (p) parentFanout[p] = (parentFanout[p] || 0) + 1; });
     const maxParentFanout = Math.max(0, ...Object.values(parentFanout));
@@ -74,9 +67,9 @@
         ls[n.id] = clampScore((p == null ? WORST_SCORE : p) + scoreNudge(nudge) + jitter);
       }
     });
-    const branchY = {};
+    const branchY: Record<string, number> = {};
     if (useBranchLaneLayout) {
-      const children = {};
+      const children: Record<string, any[]> = {};
       E.nodes.forEach((n) => { children[n.id] = []; });
       E.nodes.forEach((n) => { const p = parentOf(n); if (p && children[p]) children[p].push(n); });
       Object.values(children).forEach((arr) => arr.sort((a, b) => a.tProposed - b.tProposed || a.id.localeCompare(b.id)));
@@ -111,14 +104,14 @@
 
     const pos = {};
     const nodeTimes = E.nodes
-      .map((n) => finiteTime(n.tVerified ?? n.tProposed, null))
+      .map((n) => finiteTime(n.tVerified ?? n.tProposed, 0))
       .filter((t) => t != null);
     const metaTMax = Math.max(1, finiteTime(E.meta.tMax, 1));
     const tMin = nodeTimes.length ? Math.min(...nodeTimes) : 0;
     const tMax = Math.max(metaTMax, nodeTimes.length ? Math.max(...nodeTimes) : 0);
     const tSpan = Math.max(1, tMax - tMin);
-    const duplicateOffset = {};
-    const scoreGroups = {};
+    const duplicateOffset: Record<string, number> = {};
+    const scoreGroups: Record<string, any[]> = {};
     E.nodes.forEach((n) => {
       if (n.score == null) return;
       const key = String(n.score);
@@ -140,13 +133,19 @@
       });
     });
     const genMax = Math.max(1, ...E.nodes.map((n) => n.gen || 0));
+    const ordered = [...E.nodes].sort((a, b) => (a.tVerified || a.tProposed || 0) - (b.tVerified || b.tProposed || 0) || a.id.localeCompare(b.id));
+    const ordinal = {};
+    ordered.forEach((n, i) => { ordinal[n.id] = ordered.length <= 1 ? 0.5 : i / (ordered.length - 1); });
     E.nodes.forEach((n) => {
       const timeX = ((n.tVerified || n.tProposed || 0) - tMin) / tSpan;
       const genX = (n.gen || 0) / genMax;
-      const xRatio = useTreeLayout ? (0.82 * genX + 0.18 * timeX) : timeX;
+      const xRatio = compactRunLayout ? ordinal[n.id] : useTreeLayout ? (0.82 * genX + 0.18 * timeX) : timeX;
       const x = PAD + xRatio * (VW - 2 * PAD);
       let y;
-      if (useBranchLaneLayout) {
+      if (compactRunLayout) {
+        const jitter = (hash01(n.id) - 0.5) * 14;
+        y = scoreY(ls[n.id]) + (duplicateOffset[n.id] || 0) * 0.35 + jitter;
+      } else if (useBranchLaneLayout) {
         const jitter = (hash01(n.id) - 0.5) * 12;
         y = scoreY(ls[n.id]) + (duplicateOffset[n.id] || 0) + jitter;
       } else if (useLaneLayout) {
@@ -403,7 +402,7 @@
               <span className="dot" />{hover.st}</span></div>
           <div className="tt-title">{hover.n.title}</div>
           {nodeImage(hover.n)
-            ? <img className="tt-media" src={artifactUrl(nodeImage(hover.n).path, nodeImage(hover.n))} alt={nodeImage(hover.n).name || 'approach'} />
+            ? <img className="tt-media" src={nodeImage(hover.n).src || artifactUrl(nodeImage(hover.n).path, nodeImage(hover.n))} alt={nodeImage(hover.n).name || 'approach'} />
             : null}
           {hover.n.score != null && hover.st === 'verified'
             ? <div className="tt-score mono">{fmtScore(hover.n.score) + ' ' + (E.meta.metric || 'score')}</div>
@@ -444,6 +443,8 @@
   }
 
   function nodeImage(node) {
+    const timelapse = node && node.media && node.media.timelapse;
+    if (timelapse) return { path: timelapse.path, name: timelapse.label || 'timelapse', src: timelapse.src };
     const details = node && node.artifact && node.artifact.details;
     const images = details && Array.isArray(details.images) ? details.images : [];
     return (details && details.primaryMedia) || images[0] || null;
