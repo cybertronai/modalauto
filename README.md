@@ -8,7 +8,7 @@ From a fresh clone:
 
 ```bash
 git clone https://github.com/cybertronai/modalauto
-cd autoresearch
+cd modalauto
 
 # Optional, but keeps local Python tools isolated.
 python3 -m venv .venv
