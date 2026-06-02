@@ -7,7 +7,7 @@ Autoresearch runs agent teams against reproducible experiment folders. Each expe
 From a fresh clone:
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/cybertronai/modalauto
 cd autoresearch
 
 # Optional, but keeps local Python tools isolated.
